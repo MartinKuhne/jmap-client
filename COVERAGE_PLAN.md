@@ -20,9 +20,16 @@ Raise line coverage of the `jmap-client` library (`src/`) from **6.04%** to
 
 - Measured with `cargo llvm-cov` on the **default feature set**
   (`async, websockets, aws_lc_rs`).
-- Only `src/` counts. The mock crate and `tests/` files are excluded:
-  `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap|tests" --summary-only`
-  (exact command to be validated in P2 and recorded here).
+- Only `src/` counts. The mock crate and `tests/` files are excluded.
+  **Validated command (P1, cargo-llvm-cov 0.8.7, run from `jmap-client/`):**
+
+  ```
+  cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap|tests" --summary-only
+  ```
+
+  Verified to emit only `src/` rows (`core\error.rs`, `lib.rs`, `email\…`, …);
+  no `mock-jmap` or `tests` rows appear. Windows backslash paths need no extra
+  escaping in the regex.
 - Target: TOTAL line coverage ≥ 80.00%.
 
 ## Rules of engagement (content protection)
@@ -81,30 +88,38 @@ Raise line coverage of the `jmap-client` library (`src/`) from **6.04%** to
 - [x] Baseline: 9 tests pass, line coverage 6.04% (8514 lines)
 - [x] Ledger created; branch `coverage/rfc-mock-tests`
 
-### P1 — Mock crate: HTTP core  ⬜
-- [ ] Workspace: add `mock-jmap` member + dev-dependency; `cargo check` green
-- [ ] HTTP server skeleton: routing, request model, response writer, auth check
-- [ ] Session resource (all capability blocks incl. websocket/sieve)
-- [ ] JMAP POST dispatch: `using` validation, unknownCapability error
-- [ ] Method handler registry + canned RFC-compliant responses for:
+### P1 — Mock crate: HTTP core  ✅
+- [x] Workspace: add `mock-jmap` member + dev-dependency; `cargo check` green
+- [x] HTTP server skeleton: routing, request model, response writer, auth check
+- [x] Session resource (all capability blocks incl. websocket/sieve)
+- [x] JMAP POST dispatch: `using` validation, unknownCapability error
+- [x] Method handler registry + canned RFC-compliant responses for:
       Core/echo, Mailbox/get+changes+query+queryChanges+set,
       Thread/get+changes, Email/get+changes+query+queryChanges+set+copy+import+parse,
       SearchSnippet/get, Identity/get+set, EmailSubmission/get+query+queryChanges+set,
       VacationResponse/get+set, SieveScript/get+set+query+validate,
       Principal/get+changes+query+queryChanges+set, Blob/copy,
       PushSubscription/get+set
-- [ ] Result-reference resolution (`/list`, `/list/*/id`, `/newState`, ...)
-- [ ] createdIds / `#placeholder` round-trip
-- [ ] Problem-type error injection + 401 unauthorized
-- [ ] Mock self-tests (mock answers raw HTTP correctly)
-- [ ] Orchestrator verifies: `cargo test -p jmap-client` still green; commit
+- [x] Result-reference resolution (`/list`, `/list/*/id`, `/newState`, ...)
+- [x] createdIds / `#placeholder` round-trip
+- [x] Problem-type error injection + 401 unauthorized
+- [x] Mock self-tests (mock answers raw HTTP correctly) — 35 tests
+- [x] Orchestrator verifies: `cargo test -p jmap-client` still green; commit
+
+Note: the blob upload/download endpoints (planned for P2) were delivered with P1,
+because `Email/import` and `Blob/copy` are useless without a real upload path.
+P2 is therefore EventSource + WebSocket only.
 
 ### P2 — Mock crate: blob + EventSource + WebSocket  ⬜
-- [ ] Upload endpoint (RFC 8620 §5.1) incl. size/type edge cases
-- [ ] Download endpoint (RFC 8620 §5.2) incl. accept-type handling
+- [x] Upload endpoint (RFC 8620 §5.1) incl. size/type edge cases — *done in P1*
+- [x] Download endpoint (RFC 8620 §5.2) incl. accept-type handling — *done in P1*
 - [ ] EventSource stream (chunked, multi-event, ping keepalives, Last-Event-ID)
+      — extension point ready: `http::HttpResponse::streaming()`; route currently
+      answers `501 notImplemented`
 - [ ] WebSocket (RFC 8887): handshake w/ `jmap` subprotocol, request/response
       correlation by requestId, push frames, RequestError frame, ping/pong
+      — `tokio-tungstenite 0.29` (handshake feature) is already a mock-jmap
+      dependency and compiles; `/ws` currently answers `501 notImplemented`
 - [ ] Orchestrator verifies + commit
 
 ### P3 — Integration tests: core  ⬜
@@ -158,7 +173,53 @@ Raise line coverage of the `jmap-client` library (`src/`) from **6.04%** to
 | # | Date | Action | Line cov (src) | Tests | Notes |
 |---|------|--------|---------------|-------|-------|
 | 0 | 2026-10-28 | Baseline | 6.04% | 9 pass | pre-existing state |
+| 1 | 2026-10-28 | P1: `mock-jmap` workspace crate (HTTP core + session + full method registry + blob upload/download) | 6.04% (unchanged) | 9 client pass · 35 mock self-tests pass · 2 mock doctests pass | `cargo check -p mock-jmap`, `cargo test -p mock-jmap`, `cargo test -p jmap-client` all green. Coverage unchanged by design: P1 adds the mock, not client-facing tests; the mock crate is excluded from the metric. Deviations recorded below. |
 
 ## Findings log
 
-(bugs / RFC deviations discovered — none yet)
+Discovered while building the mock against `src/` + the RFCs. None of these are
+`src/` bugs; they are contract facts later phases must respect.
+
+1. **Malformed JSON is `notJSON`, not `couldNotParseJson`.** The plan's
+   error-injection note named `couldNotParseJson`, which is not a registered
+   RFC 8620 §3.1 problem type. The mock answers
+   `400 urn:ietf:params:jmap:error:notJSON` (client:
+   `ProblemType::NotJson`). `couldNotParseJson` remains available as a free-form
+   injected string if a test really wants it.
+2. **`submissionExtensions` must be an array of strings.** RFC 8621 §4.3 allows
+   an object (`{"SIZE": {...}}`), but `jmap_client` models it as `Vec<String>`,
+   so the object form fails to deserialise. The mock advertises
+   `["SIZE", "DSN", "UTF8ONLY"]`.
+3. **`Capabilities::Other` is unreachable for object-valued capabilities.**
+   `src/core/session.rs` tries the field-less `EmptyCapabilities` variant first
+   and serde ignores unknown fields, so any object capability (e.g.
+   `urn:ietf:params:jmap:mdn` with `maxSizeMaildropReport`) deserialises as
+   `Empty`. Only non-object capability values can reach `Other`. Do not write a
+   test that expects `Other` from an object.
+4. **`SieveScript/validate` reports an invalid script as a *success* response
+   carrying an `error` member**, not as a method error — that is what
+   `SieveScriptValidateResponse::unwrap_error()` expects. The mock returns
+   `{"accountId": …, "error": {"type": "invalidScript", …}}` under a normal
+   `SieveScript/validate` response tag.
+5. **Upload oversize problem type.** The plan said `cannotUploadBlob`; RFC 8620
+   §5.1 registers `urn:ietf:params:jmap:error:limit`. The mock sends
+   `cannotUploadBlob` (what Stalwart-style servers return) and exposes
+   `problem_type::LIMIT` so a test can switch. `MockHandle::set_max_size_upload()`
+   lowers the limit so the 413 path is testable without allocating 50 MiB.
+6. **Unresolvable result reference is an in-band method error**
+   (`invalidResultReference`, RFC 8620 §3.6), never a top-level problem
+   document — the request itself was well formed.
+7. **`Client::handle_error` byte-compares the content type.** It matches
+   `application/problem+json` exactly, so the mock must never append
+   `; charset=utf-8`. Enforced by `problem::problem_response`.
+8. **Required (non-`Option`) response members.** A response missing any of
+   `GetResponse.{state,list,notFound}`,
+   `ChangesResponse.{accountId,oldState,newState,hasMoreChanges,created,updated,destroyed}`,
+   `QueryResponse.{accountId,queryState,position,ids}`,
+   `QueryChangesResponse.{accountId,oldQueryState,newQueryState,removed,added}`,
+   `CopyResponse.{fromAccountId,accountId,newState}` fails client deserialisation.
+   The mock always emits them.
+9. **Disk space:** the D: volume hosting `target/` ran out of space mid-P1
+   (`os error 112`). Cleared `target/debug/incremental` (regenerable cache) to
+   finish. If a later phase hits the same error, clear that directory again — it
+   is build cache, not source.

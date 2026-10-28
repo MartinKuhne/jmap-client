@@ -41,6 +41,13 @@ aws_lc_rs = ["rustls/aws_lc_rs"]
 aws-lc-rs = ["aws_lc_rs"]
 debug = []
 
+[workspace]
+members = [".", "mock-jmap"]
+
+[dev-dependencies]
+# Shared RFC-compliant JMAP mock server used by the integration tests.
+mock-jmap = { path = "mock-jmap" }
+
 [lib]
 doctest = false
 
