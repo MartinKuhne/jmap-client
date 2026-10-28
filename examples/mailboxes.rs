@@ -13,13 +13,15 @@
  * except according to those terms.
  */
 
-#[cfg(feature = "async")]
+// Written against the async API: enabling `blocking` turns every `maybe_async`
+// call synchronous, so this example is compiled out in that configuration.
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 use jmap_client::{
     client::Client,
     mailbox::{query::Filter, Role},
 };
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 async fn mailboxes() {
     // Connect to the JMAP server using Basic authentication
     let client = Client::new()
@@ -67,6 +69,6 @@ async fn mailboxes() {
 }
 
 fn main() {
-    #[cfg(feature = "async")]
+    #[cfg(all(feature = "async", not(feature = "blocking")))]
     let _c = mailboxes();
 }

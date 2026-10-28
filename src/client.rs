@@ -26,7 +26,10 @@ use reqwest::{
     header::{self},
     redirect,
 };
-#[cfg(feature = "async")]
+// `blocking` takes precedence over `async`: it enables maybe-async's `is_sync`
+// switch, which makes this API synchronous, so the async types must not be
+// imported alongside their blocking counterparts (they share the same names).
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 use reqwest::{Client as HttpClient, Response};
 use serde::de::DeserializeOwned;
 use std::{
@@ -56,7 +59,8 @@ pub struct Client {
 
     upload_url: Vec<URLPart<blob::URLParameter>>,
     download_url: Vec<URLPart<blob::URLParameter>>,
-    #[cfg(feature = "async")]
+    // EventSource requires the async runtime; see the module gate in lib.rs.
+    #[cfg(all(feature = "async", not(feature = "blocking")))]
     event_source_url: Vec<URLPart<crate::event_source::URLParameter>>,
 
     headers: header::HeaderMap,
@@ -252,7 +256,7 @@ impl ClientBuilder {
         Ok(Client {
             download_url: URLPart::parse(session.download_url())?,
             upload_url: URLPart::parse(session.upload_url())?,
-            #[cfg(feature = "async")]
+            #[cfg(all(feature = "async", not(feature = "blocking")))]
             event_source_url: URLPart::parse(session.event_source_url())?,
             api_url: session.api_url().to_string(),
             session: parking_lot::Mutex::new(Arc::new(session)),
@@ -405,7 +409,7 @@ impl Client {
         &self.upload_url
     }
 
-    #[cfg(feature = "async")]
+    #[cfg(all(feature = "async", not(feature = "blocking")))]
     pub fn event_source_url(&self) -> &[URLPart<crate::event_source::URLParameter>] {
         &self.event_source_url
     }

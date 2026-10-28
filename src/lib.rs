@@ -186,7 +186,11 @@ pub mod client;
 pub mod core;
 pub mod email;
 pub mod email_submission;
-#[cfg(feature = "async")]
+// EventSource push streams need an async runtime (`bytes_stream()` +
+// `async-stream`), which the `blocking` feature removes by turning every
+// `maybe_async` call synchronous. They are therefore only available when
+// `blocking` is off.
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 pub mod event_source;
 pub mod identity;
 pub mod mailbox;

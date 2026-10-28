@@ -13,12 +13,15 @@
  * except according to those terms.
  */
 
-#[cfg(feature = "async")]
+// Written against the async API: enabling `blocking` turns every `maybe_async`
+// call synchronous and removes the EventSource module entirely, so this example is
+// compiled out in that configuration.
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 use futures_util::StreamExt;
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 use jmap_client::{client::Client, DataType};
 
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 async fn event_source() {
     // Connect to the JMAP server using Basic authentication
     let client = Client::new()
@@ -72,6 +75,6 @@ async fn event_source() {
 }
 
 fn main() {
-    #[cfg(feature = "async")]
+    #[cfg(all(feature = "async", not(feature = "blocking")))]
     let _c = event_source();
 }

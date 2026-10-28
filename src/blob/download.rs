@@ -13,9 +13,12 @@ use reqwest::header::CONTENT_TYPE;
 
 use crate::{client::Client, core::session::URLPart};
 
+// `blocking` takes precedence over `async`: it enables maybe-async's `is_sync`
+// switch, which makes this API synchronous, so the async client must not be
+// imported alongside it (both are named `HttpClient`).
 #[cfg(feature = "blocking")]
 use reqwest::blocking::Client as HttpClient;
-#[cfg(feature = "async")]
+#[cfg(all(feature = "async", not(feature = "blocking")))]
 use reqwest::Client as HttpClient;
 
 impl Client {
