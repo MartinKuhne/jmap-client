@@ -81,6 +81,32 @@ Raise line coverage of the `jmap-client` library (`src/`) from **6.04%** to
   submissions, vacation response, sieve scripts, principals) seeded with
   RFC-realistic fixtures so Get/Query/Changes return coherent data.
 
+## Mock alternatives survey (2026-10-28)
+
+Researched before committing further to the hand-rolled mock:
+
+- **wiremock** — generic request→response matcher (used by `jmap-base-client`
+  with hand-written fixtures). Cannot do: result-reference resolution within a
+  request, createdIds, advancing change history, WebSocket, SSE streaming.
+  Hand-written response JSON per test mirrors client assumptions instead of
+  checking them against the RFCs.
+- **mejl-fake 0.2.0** (MIT OR Apache-2.0, published 2 days ago, ~10.7k LoC,
+  axum) — closest existing option: RFC-written, result refs, creation ids,
+  change logs, EventSource, blob up/download, fault injection. Rejected as
+  primary because it is Fastmail-shaped: no Sieve draft, no Principal/*,
+  no Blob/copy, no RFC 8887 WebSocket; session at `/jmap/session` (client
+  hardcodes `/.well-known/jmap`); couples to its own `mejl-jmap` transport
+  types; effectively unproven (1 version). Patterns worth borrowing:
+  `mutate_from_elsewhere()` for driving push tests, runtime `Quirks`
+  fault switches.
+- **crate-jmap / jmap-server kit** — server framework; its test jig is
+  `publish = false`, not consumable.
+- **saehrimnir** — binary-only fixture mock, JMAP read-path only, no WS.
+
+Decision: keep `mock-jmap` (workspace crate). It is the only option covering
+the client's full surface (all 38 Method-enum methods + WS + EventSource +
+blob + sieve draft + principals) with RFC semantics rather than canned JSON.
+
 ## Phases
 
 ### P0 — Baseline & setup  ✅
