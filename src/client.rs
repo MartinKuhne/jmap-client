@@ -51,10 +51,12 @@ pub enum Credentials {
 }
 
 pub struct Client {
-    session: parking_lot::Mutex<Arc<Session>>,
+    // `Arc`-shared so that the `'static` WebSocket stream can observe the *live*
+    // session instead of a snapshot taken when the stream was created.
+    session: Arc<parking_lot::Mutex<Arc<Session>>>,
     session_url: String,
     api_url: String,
-    session_updated: AtomicBool,
+    session_updated: Arc<AtomicBool>,
     trusted_hosts: Arc<AHashSet<String>>,
 
     upload_url: Vec<URLPart<blob::URLParameter>>,
@@ -259,9 +261,9 @@ impl ClientBuilder {
             #[cfg(all(feature = "async", not(feature = "blocking")))]
             event_source_url: URLPart::parse(session.event_source_url())?,
             api_url: session.api_url().to_string(),
-            session: parking_lot::Mutex::new(Arc::new(session)),
+            session: Arc::new(parking_lot::Mutex::new(Arc::new(session))),
             session_url,
-            session_updated: true.into(),
+            session_updated: Arc::new(true.into()),
             accept_invalid_certs: self.accept_invalid_certs,
             trusted_hosts,
             #[cfg(feature = "websockets")]
@@ -311,9 +313,9 @@ impl Client {
             #[cfg(feature = "async")]
             event_source_url: URLPart::parse(session.event_source_url()).unwrap(),
             api_url: session.api_url().to_string(),
-            session: parking_lot::Mutex::new(Arc::new(session)),
+            session: Arc::new(parking_lot::Mutex::new(Arc::new(session))),
             session_url,
-            session_updated: true.into(),
+            session_updated: Arc::new(true.into()),
             accept_invalid_certs: false,
             trusted_hosts: Arc::new(AHashSet::new()),
             #[cfg(feature = "websockets")]
@@ -345,6 +347,19 @@ impl Client {
 
     pub fn session(&self) -> Arc<Session> {
         self.session.lock().clone()
+    }
+
+    /// Handle to the *live* session, shared with anyone who needs to observe
+    /// session refreshes instead of a snapshot taken at construction time.
+    #[cfg(feature = "websockets")]
+    pub(crate) fn session_handle(&self) -> Arc<parking_lot::Mutex<Arc<Session>>> {
+        self.session.clone()
+    }
+
+    /// Handle to the shared "session is up to date" flag.
+    #[cfg(feature = "websockets")]
+    pub(crate) fn session_updated_flag(&self) -> Arc<AtomicBool> {
+        self.session_updated.clone()
     }
 
     pub fn session_url(&self) -> &str {

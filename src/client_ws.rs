@@ -9,7 +9,10 @@
  * except according to those terms.
  */
 
-use std::{pin::Pin, sync::Arc};
+use std::{
+    pin::Pin,
+    sync::{atomic::Ordering, Arc},
+};
 
 use ahash::AHashMap;
 use futures_util::{stream::SplitSink, SinkExt, Stream, StreamExt};
@@ -253,6 +256,15 @@ impl Client {
 
         *self.ws.lock().await = WsStream { tx, req_id: 0 }.into();
 
+        // The stream returned below is `'static`, so it cannot borrow `self`.
+        // Share the session and the "session is up to date" flag instead of taking
+        // a snapshot, so every response is compared against the *live* cached
+        // session (a snapshot would wrongly report staleness as soon as the
+        // session is refreshed over HTTP). This mirrors the check performed by
+        // `Client::send()` on the HTTP path, see issue #31.
+        let session_handle = self.session_handle();
+        let session_updated = self.session_updated_flag();
+
         Ok(Box::pin(async_stream::stream! {
             while let Some(message) = rx.next().await {
                 match message {
@@ -260,6 +272,9 @@ impl Client {
                         match serde_json::from_slice::<WebSocketMessage_>(&message.into_data()) {
                             Ok(message) => match message {
                                 WebSocketMessage_::Response(response) => {
+                                    if response.session_state != session_handle.lock().state() {
+                                        session_updated.store(false, Ordering::Relaxed);
+                                    }
                                     yield Ok(WebSocketMessage::Response(Response::new(
                                         response.method_responses,
                                         response.created_ids,
@@ -371,5 +386,172 @@ impl From<WebSocketError> for ProblemDetails {
             problem.limit,
             problem.request_id,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::{net::TcpListener, task::JoinHandle, time::timeout};
+    use tokio_tungstenite::{
+        accept_hdr_async,
+        tungstenite::{
+            handshake::server::{Request, Response},
+            http::HeaderValue,
+            Message,
+        },
+    };
+
+    use crate::{client::Client, client_ws::WebSocketMessage, core::session::Session};
+
+    /// Session state the client under test has cached.
+    const CACHED_SESSION_STATE: &str = "cached-state-AAA";
+
+    /// A JMAP session document that advertises the WebSocket capability at
+    /// `ws_url` and carries `state` as its session state.
+    fn session_json(state: &str, ws_url: &str) -> String {
+        format!(
+            r#"{{
+                "capabilities": {{
+                    "urn:ietf:params:jmap:core": {{
+                        "maxSizeUpload": 52428800,
+                        "maxConcurrentUpload": 2,
+                        "maxSizeRequest": 10485760,
+                        "maxConcurrentRequests": 2,
+                        "maxCallsInRequest": 16,
+                        "maxObjectsInGet": 512,
+                        "maxObjectsInSet": 512,
+                        "collationAlgorithms": ["i;ascii-numeric"]
+                    }},
+                    "urn:ietf:params:jmap:websocket": {{
+                        "url": "{ws_url}",
+                        "supportsPush": true
+                    }}
+                }},
+                "accounts": {{}},
+                "primaryAccounts": {{}},
+                "username": "test@example.org",
+                "apiUrl": "https://example.org/jmap/api/",
+                "downloadUrl": "https://example.org/jmap/download/{{accountId}}/{{blobId}}/{{name}}?accept={{type}}",
+                "uploadUrl": "https://example.org/jmap/upload/{{accountId}}",
+                "eventSourceUrl": "https://example.org/jmap/event/?types={{types}}&closeafter={{closeafter}}&ping={{ping}}",
+                "state": "{state}"
+            }}"#
+        )
+    }
+
+    /// A canned `WebSocketResponse` frame as sent by a RFC 8887 compliant server.
+    fn ws_response_json(session_state: &str) -> String {
+        format!(
+            r#"{{
+                "@type": "Response",
+                "requestId": "0",
+                "methodResponses": [["Core/echo", {{}}, "c0"]],
+                "createdIds": {{}},
+                "sessionState": "{session_state}"
+            }}"#
+        )
+    }
+
+    /// Starts a local WebSocket server that answers the first connection with a
+    /// single canned text frame and then keeps the connection open for a while.
+    #[allow(clippy::result_large_err)]
+    async fn spawn_ws_server(frame: String) -> (u16, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // `connect_ws()` asks for the "jmap" sub-protocol, so the server has to
+            // echo it back or the client aborts the handshake.
+            let mut ws = accept_hdr_async(stream, |_request: &Request, mut response: Response| {
+                response
+                    .headers_mut()
+                    .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("jmap"));
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            let _ = ws.send(Message::Text(frame.into())).await;
+            // Stay alive so the client is not raced by an early close.
+            let _ = tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        (port, handle)
+    }
+
+    fn test_client(cached_state: &str, ws_url: &str) -> Client {
+        let session: Session = serde_json::from_str(&session_json(cached_state, ws_url)).unwrap();
+        Client::from_session_for_tests(session)
+    }
+
+    async fn first_message(client: &Client) -> WebSocketMessage {
+        let mut stream = client.connect_ws().await.unwrap();
+        timeout(Duration::from_secs(30), stream.next())
+            .await
+            .expect("timed out waiting for the canned WebSocket response")
+            .expect("WebSocket stream ended unexpectedly")
+            .expect("WebSocket stream yielded an error")
+    }
+
+    #[tokio::test]
+    async fn ws_response_with_changed_session_state_marks_session_stale() {
+        let (port, _server) = spawn_ws_server(ws_response_json("server-state-BBB")).await;
+        let client = test_client(
+            CACHED_SESSION_STATE,
+            &format!("ws://127.0.0.1:{port}/jmap/ws"),
+        );
+
+        assert!(
+            client.is_session_updated(),
+            "pre-condition: a freshly built client reports an up-to-date session"
+        );
+
+        let message = first_message(&client).await;
+
+        assert!(
+            matches!(message, WebSocketMessage::Response(_)),
+            "expected a WebSocket response message, got {message:?}"
+        );
+        assert_eq!(message_session_state(&message), "server-state-BBB");
+        assert!(
+            !client.is_session_updated(),
+            "a WebSocket response whose sessionState differs from the cached session must mark \
+             the session stale, just like the HTTP path does"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_response_with_unchanged_session_state_keeps_session_updated() {
+        let (port, _server) = spawn_ws_server(ws_response_json(CACHED_SESSION_STATE)).await;
+        let client = test_client(
+            CACHED_SESSION_STATE,
+            &format!("ws://127.0.0.1:{port}/jmap/ws"),
+        );
+
+        assert!(
+            client.is_session_updated(),
+            "pre-condition: a freshly built client reports an up-to-date session"
+        );
+
+        let message = first_message(&client).await;
+
+        assert!(
+            matches!(message, WebSocketMessage::Response(_)),
+            "expected a WebSocket response message, got {message:?}"
+        );
+        assert_eq!(message_session_state(&message), CACHED_SESSION_STATE);
+        assert!(
+            client.is_session_updated(),
+            "a WebSocket response whose sessionState matches the cached session must not mark \
+             the session stale"
+        );
+    }
+
+    fn message_session_state(message: &WebSocketMessage) -> &str {
+        match message {
+            WebSocketMessage::Response(response) => response.session_state(),
+            WebSocketMessage::PushNotification(_) => panic!("expected a response, got a push"),
+        }
     }
 }
