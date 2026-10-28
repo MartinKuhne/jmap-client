@@ -28,6 +28,9 @@ parking_lot = "0.12"
 encodify = "1.0"
 maybe-async = "0.2"
 
+[dev-dependencies]
+tokio = { version = "1.51", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "time", "io-util"] }
+
 [features]
 default = ["async", "websockets", "aws_lc_rs"]
 async = ["futures-util", "async-stream", "reqwest/stream"]
