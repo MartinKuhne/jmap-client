@@ -13,15 +13,17 @@
  * except according to those terms.
  */
 
-#[cfg(feature = "websockets")]
+// Written against the async API: enabling `blocking` turns every `maybe_async`
+// call synchronous, so this example is compiled out in that configuration.
+#[cfg(all(feature = "websockets", not(feature = "blocking")))]
 use futures_util::StreamExt;
-#[cfg(feature = "websockets")]
+#[cfg(all(feature = "websockets", not(feature = "blocking")))]
 use jmap_client::{client::Client, client_ws::WebSocketMessage, core::set::SetObject};
-#[cfg(feature = "websockets")]
+#[cfg(all(feature = "websockets", not(feature = "blocking")))]
 use tokio::sync::mpsc;
 
 // Make sure the "websockets" feature is enabled!
-#[cfg(feature = "websockets")]
+#[cfg(all(feature = "websockets", not(feature = "blocking")))]
 async fn websocket() {
     // Connect to the JMAP server using Basic authentication
 
@@ -91,6 +93,6 @@ async fn websocket() {
 }
 
 fn main() {
-    #[cfg(feature = "websockets")]
+    #[cfg(all(feature = "websockets", not(feature = "blocking")))]
     let _c = websocket();
 }

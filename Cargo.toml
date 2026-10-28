@@ -31,7 +31,7 @@ maybe-async = "0.2"
 [features]
 default = ["async", "websockets", "aws_lc_rs"]
 async = ["futures-util", "async-stream", "reqwest/stream"]
-websockets = ["tokio", "tokio-tungstenite", "rustls"]
+websockets = ["tokio", "tokio-tungstenite", "rustls", "futures-util", "async-stream"]
 blocking = ["reqwest/blocking", "maybe-async/is_sync"]
 ring = ["rustls/ring"]
 aws_lc_rs = ["rustls/aws_lc_rs"]
