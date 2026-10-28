@@ -93,6 +93,11 @@ impl ClientBuilder {
     ///
     /// Setting the credentials is required to connect to the JMAP API.
     pub fn new() -> Self {
+        // reqwest is used with the provider-neutral `rustls-no-provider` feature, so the
+        // provider chosen by this crate's `ring`/`aws_lc_rs` features has to be installed
+        // before any TLS client is built.
+        crate::crypto::ensure_crypto_provider();
+
         Self {
             credentials: None,
             trusted_hosts: AHashSet::new(),
