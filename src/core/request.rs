@@ -566,3 +566,231 @@ impl ResultReference {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{client::Client, core::request::Request, core::session::Session, URI};
+    use serde_json::{json, Value};
+
+    /// Builds the `capabilities` map value advertised for a given capability id.
+    ///
+    /// Capabilities the crate models explicitly get a realistic payload, everything
+    /// else (including capabilities unknown to this crate) gets an empty object.
+    fn capability_value(capability: &str) -> Value {
+        match capability {
+            "urn:ietf:params:jmap:core" => json!({
+                "maxSizeUpload": 52_428_800,
+                "maxConcurrentUpload": 2,
+                "maxSizeRequest": 10_485_760,
+                "maxConcurrentRequests": 2,
+                "maxCallsInRequest": 16,
+                "maxObjectsInGet": 512,
+                "maxObjectsInSet": 512,
+                "collationAlgorithms": [
+                    "i;ascii-numeric",
+                    "i;ascii-casemap",
+                    "i;unicode-casemap"
+                ]
+            }),
+            "urn:ietf:params:jmap:mail" => json!({
+                "maxMailboxesPerEmail": null,
+                "maxMailboxDepth": 10,
+                "maxSizeMailboxName": 46,
+                "maxSizeAttachmentsPerEmail": 26_214_400,
+                "emailQuerySortOptions": ["receivedAt", "subject", "size"],
+                "mayCreateTopLevelMailbox": true
+            }),
+            "urn:ietf:params:jmap:submission" => json!({
+                "maxDelayedSend": 0,
+                "submissionExtensions": []
+            }),
+            "urn:ietf:params:jmap:websocket" => json!({
+                "url": "wss://example.com/jmap/ws",
+                "supportsPush": true
+            }),
+            _ => json!({}),
+        }
+    }
+
+    /// Builds a session, as advertised by `GET /.well-known/jmap`, that advertises
+    /// exactly the given capabilities.
+    fn session_advertising(capabilities: &[&str]) -> Session {
+        let mut advertised = serde_json::Map::new();
+        for capability in capabilities {
+            advertised.insert((*capability).to_string(), capability_value(capability));
+        }
+
+        let payload = json!({
+            "capabilities": advertised,
+            "accounts": {
+                "account1": {
+                    "name": "user@example.com",
+                    "isPersonal": true,
+                    "isReadOnly": false,
+                    "accountCapabilities": {}
+                }
+            },
+            "primaryAccounts": {
+                "urn:ietf:params:jmap:mail": "account1"
+            },
+            "username": "user@example.com",
+            "apiUrl": "https://example.com/jmap/session",
+            "downloadUrl":
+                "https://example.com/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
+            "uploadUrl": "https://example.com/jmap/upload/{accountId}",
+            "eventSourceUrl":
+                "https://example.com/jmap/eventSource?types={types}&closeafter={closeafter}&ping={ping}",
+            "state": "1234567-1"
+        });
+
+        let session = serde_json::from_str::<Session>(&payload.to_string())
+            .expect("test session payload must deserialize");
+
+        // Guard the fixture itself: a typo in a capability id above would otherwise
+        // silently change what the tests below are asserting.
+        assert_eq!(
+            session.capabilities().count(),
+            capabilities.len(),
+            "every requested capability must end up in the session"
+        );
+        for capability in capabilities {
+            assert!(
+                session.has_capability(*capability),
+                "session fixture does not advertise {:?}",
+                capability
+            );
+        }
+
+        session
+    }
+
+    /// Builds a client, without any network access, whose session advertises
+    /// exactly the given capabilities.
+    fn client_advertising(capabilities: &[&str]) -> Client {
+        Client::from_session_for_tests(session_advertising(capabilities))
+    }
+
+    #[test]
+    fn fastmail_like_session_only_uses_advertised_capabilities() {
+        let client = client_advertising(&[
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+            "urn:ietf:params:jmap:vacationresponse",
+            "urn:ietf:params:jmap:mdn",
+            "urn:ietf:params:jmap:changes",
+            "urn:ietf:params:jmap:serverMerge",
+            "urn:ietf:params:jmap:oldEmailIds",
+        ]);
+        let request = Request::new(&client);
+
+        assert_eq!(
+            request.using,
+            vec![URI::Core, URI::Mail, URI::Submission, URI::VacationResponse,],
+            "using must contain only the capabilities advertised by the server"
+        );
+    }
+
+    #[test]
+    fn james_like_session_only_uses_advertised_capabilities_in_canonical_order() {
+        let client = client_advertising(&[
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:mdn",
+            "urn:ietf:params:jmap:quota",
+            "urn:ietf:params:jmap:submission",
+            "urn:ietf:params:jmap:vacationresponse",
+            "urn:ietf:params:jmap:websocket",
+        ]);
+        let request = Request::new(&client);
+
+        assert_eq!(
+            request.using,
+            vec![
+                URI::Core,
+                URI::Mail,
+                URI::Submission,
+                URI::VacationResponse,
+                URI::WebSocket,
+                URI::Quota,
+            ],
+            "using must follow the canonical order, not the order advertised"
+        );
+    }
+
+    #[test]
+    fn full_session_keeps_all_known_capabilities() {
+        let client = client_advertising(&[
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+            "urn:ietf:params:jmap:vacationresponse",
+            "urn:ietf:params:jmap:contacts",
+            "urn:ietf:params:jmap:calendars",
+            "urn:ietf:params:jmap:websocket",
+            "urn:ietf:params:jmap:sieve",
+            "urn:ietf:params:jmap:blob",
+            "urn:ietf:params:jmap:quota",
+            "urn:ietf:params:jmap:principals",
+        ]);
+        let request = Request::new(&client);
+
+        assert_eq!(
+            request.using,
+            vec![
+                URI::Core,
+                URI::Mail,
+                URI::Submission,
+                URI::VacationResponse,
+                URI::Contacts,
+                URI::Calendars,
+                URI::WebSocket,
+                URI::Sieve,
+                URI::Blob,
+                URI::Quota,
+                URI::Principals,
+            ],
+            "a server advertising everything must keep the previous behaviour"
+        );
+    }
+
+    #[test]
+    fn core_capability_is_always_included() {
+        let client = client_advertising(&["urn:ietf:params:jmap:mail"]);
+        let request = Request::new(&client);
+
+        assert_eq!(
+            request.using,
+            vec![URI::Core, URI::Mail],
+            "RFC 8620 3.6.1: clients must always include the core capability"
+        );
+    }
+
+    #[test]
+    fn using_serializes_as_advertised_capability_uris() {
+        let client = client_advertising(&[
+            "urn:ietf:params:jmap:core",
+            "urn:ietf:params:jmap:mail",
+            "urn:ietf:params:jmap:submission",
+            "urn:ietf:params:jmap:vacationresponse",
+            "urn:ietf:params:jmap:mdn",
+            "urn:ietf:params:jmap:changes",
+            "urn:ietf:params:jmap:serverMerge",
+            "urn:ietf:params:jmap:oldEmailIds",
+        ]);
+        let request = Request::new(&client);
+
+        let serialized = serde_json::to_value(&request).expect("request must serialize");
+
+        assert_eq!(
+            serialized["using"],
+            json!([
+                "urn:ietf:params:jmap:core",
+                "urn:ietf:params:jmap:mail",
+                "urn:ietf:params:jmap:submission",
+                "urn:ietf:params:jmap:vacationresponse"
+            ]),
+            "the JSON `using` array must contain exactly the advertised capabilities"
+        );
+    }
+}
