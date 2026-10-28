@@ -184,6 +184,7 @@
 pub mod blob;
 pub mod client;
 pub mod core;
+mod crypto;
 pub mod email;
 pub mod email_submission;
 // EventSource push streams need an async runtime (`bytes_stream()` +
