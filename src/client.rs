@@ -281,6 +281,51 @@ impl Client {
         ClientBuilder::new()
     }
 
+    /// Builds a `Client` from an already-known `Session` without any network access.
+    ///
+    /// Test-only helper: the regular construction path ([ClientBuilder::connect()](struct.ClientBuilder.html#method.connect))
+    /// requires a reachable server, which makes it unusable for unit tests that only
+    /// need to inspect what a `Client` would send based on its session.
+    #[cfg(test)]
+    pub(crate) fn from_session_for_tests(session: Session) -> Self {
+        let session_url = "https://example.com/.well-known/jmap".to_string();
+        let default_account_id = session
+            .primary_accounts()
+            .next()
+            .map(|a| a.1.to_string())
+            .unwrap_or_else(|| "account1".to_string());
+
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            header::HeaderValue::from_static(USER_AGENT),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+
+        Client {
+            download_url: URLPart::parse(session.download_url()).unwrap(),
+            upload_url: URLPart::parse(session.upload_url()).unwrap(),
+            #[cfg(feature = "async")]
+            event_source_url: URLPart::parse(session.event_source_url()).unwrap(),
+            api_url: session.api_url().to_string(),
+            session: parking_lot::Mutex::new(Arc::new(session)),
+            session_url,
+            session_updated: true.into(),
+            accept_invalid_certs: false,
+            trusted_hosts: Arc::new(AHashSet::new()),
+            #[cfg(feature = "websockets")]
+            authorization: "Bearer test-token".to_string(),
+            timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
+            headers,
+            default_account_id,
+            #[cfg(feature = "websockets")]
+            ws: None.into(),
+        }
+    }
+
     pub fn set_timeout(&mut self, timeout: Duration) -> &mut Self {
         self.timeout = timeout;
         self
