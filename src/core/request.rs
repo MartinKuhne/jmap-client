@@ -473,22 +473,46 @@ impl Arguments {
     }
 }
 
+/// The JMAP capabilities this crate may announce, in canonical order.
+///
+/// This is only the candidate list: [`Request::new`] keeps the entries the server
+/// actually advertised. The set is the same one this crate has always announced,
+/// which is why [`URI::PrincipalsOwner`] is not a candidate.
+const KNOWN_CAPABILITIES: [URI; 11] = [
+    URI::Core,
+    URI::Mail,
+    URI::Submission,
+    URI::VacationResponse,
+    URI::Contacts,
+    URI::Calendars,
+    URI::WebSocket,
+    URI::Sieve,
+    URI::Blob,
+    URI::Quota,
+    URI::Principals,
+];
+
 impl<'x> Request<'x> {
+    /// Builds a request that announces only the capabilities the server advertised.
+    ///
+    /// Strict servers such as Fastmail and Apache James reject a request whose
+    /// `using` array contains a capability they did not advertise with an
+    /// `unknownCapability` error, so [`KNOWN_CAPABILITIES`] is filtered against
+    /// the session. The canonical order is preserved and no entry can repeat,
+    /// because the candidate list holds each capability exactly once.
+    ///
+    /// [`URI::Core`] is kept even when the session does not advertise it: RFC 8620
+    /// section 3.6.1 requires clients to always include the core capability.
     pub fn new(client: &'x Client) -> Self {
+        let session = client.session();
+        let using = KNOWN_CAPABILITIES
+            .iter()
+            .filter(|uri| **uri == URI::Core || session.has_capability(uri.as_ref()))
+            .cloned()
+            .collect();
+
         Request {
-            using: vec![
-                URI::Core,
-                URI::Mail,
-                URI::Submission,
-                URI::VacationResponse,
-                URI::Contacts,
-                URI::Calendars,
-                URI::WebSocket,
-                URI::Sieve,
-                URI::Blob,
-                URI::Quota,
-                URI::Principals,
-            ],
+            using,
             method_calls: vec![],
             created_ids: None,
             account_id: client.default_account_id().to_string(),
