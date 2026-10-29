@@ -328,7 +328,25 @@ fn decode_chunked(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Writes `response` to `stream` and shuts the write half down.
-pub async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> io::Result<()> {
+///
+/// Head and body are composed into **one** buffer and pushed with a single
+/// `write_all`, flushed, and only then is the socket shut down. That is not an
+/// optimisation, it is the fix for the handshake flake the plan records as
+/// Finding #77: a WebSocket client refused at the handshake
+/// (`tungstenite::Error::Http`) never reads the body itself —
+/// `tungstenite::handshake::client` sets the response body to the handshake
+/// `tail`, i.e. *only the bytes that happened to be in its read buffer when the
+/// response head finished parsing*. Written as two `write_all` calls, the head
+/// and the body can leave as two TCP segments, and then the rejection reaches the
+/// client with an **empty** body. One write of a sub-MSS payload puts head and
+/// body in the same segment, so the rejection always explains itself.
+///
+/// Generic over the sink so the single-write invariant is unit-testable without a
+/// socket; every real caller passes a [`TcpStream`].
+pub async fn write_response<S>(stream: &mut S, response: &HttpResponse) -> io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let head = format!(
         "HTTP/1.1 {} {}\r\n\
          Content-Type: {}\r\n\
@@ -339,14 +357,16 @@ pub async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> 
         response.content_type,
         response.body.len()
     );
-    let mut head = head.into_bytes();
+    let mut buf = head.into_bytes();
     for (name, value) in &response.extra_headers {
-        head.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        buf.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
     }
-    head.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(&response.body);
 
-    stream.write_all(&head).await?;
-    stream.write_all(&response.body).await?;
+    // One write: see the doc comment. `write_all` loops only if the kernel
+    // refuses part of the buffer, which a sub-MSS rejection never does.
+    stream.write_all(&buf).await?;
     stream.flush().await?;
     let _ = stream.shutdown().await;
     Ok(())
@@ -375,12 +395,18 @@ pub async fn write_streaming_head(stream: &mut TcpStream) -> io::Result<()> {
 /// The flush is the point of this function: without it a notification could sit
 /// in the socket buffer until the next one arrives, and a client waiting for
 /// `closeafter=state` would wait forever.
+///
+/// The framing and the payload go out in a **single** write for the same reason
+/// [`write_response`] does: `jmap_client`'s SSE parser replaces its buffer on
+/// every `Bytes` it is handed rather than appending, so an event that is split
+/// across two reads is lost instead of reassembled. One chunk, one write, one
+/// segment keeps every event whole by the time it reaches the parser.
 pub async fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
-    stream
-        .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
-        .await?;
-    stream.write_all(bytes).await?;
-    stream.write_all(b"\r\n").await?;
+    let mut frame = format!("{:x}\r\n", bytes.len()).into_bytes();
+    frame.extend_from_slice(bytes);
+    frame.extend_from_slice(b"\r\n");
+
+    stream.write_all(&frame).await?;
     stream.flush().await
 }
 
@@ -518,4 +544,83 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// A sink that keeps every `poll_write` separate, so a test can see how many
+    /// writes a response really is rather than only what bytes arrived.
+    #[derive(Default)]
+    struct RecordingSink {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl AsyncWrite for RecordingSink {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            this.writes.push(buf.to_vec());
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The Finding #77 invariant.
+    ///
+    /// A WebSocket client refused at the handshake reports the rejection body as
+    /// whatever was already in its read buffer when the head parsed
+    /// (`tungstenite::handshake::client`: `*e.body_mut() = Some(tail)`). If the
+    /// head and the body leave as two segments, the tail is empty and the client
+    /// sees a rejection that explains nothing — the flake that made
+    /// `websocket_refuses_a_connection_that_offers_no_subprotocol` fail about
+    /// one run in three. Exactly one write means one segment means the body is
+    /// always there.
+    #[tokio::test]
+    async fn write_response_emits_head_and_body_in_one_write() {
+        let mut sink = RecordingSink::default();
+        let response = HttpResponse::raw(
+            400,
+            "application/problem+json",
+            br#"{"type":"missingSubprotocol","status":400,"title":"no jmap"}"#.to_vec(),
+        );
+
+        write_response(&mut sink, &response).await.expect("write");
+
+        assert_eq!(
+            sink.writes.len(),
+            1,
+            "head and body must leave together, got {} separate writes: {:?}",
+            sink.writes.len(),
+            sink.writes
+                .iter()
+                .map(|w| String::from_utf8_lossy(w).into_owned())
+                .collect::<Vec<_>>()
+        );
+
+        let written = String::from_utf8(sink.writes[0].clone()).expect("utf-8");
+        assert!(written.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{written}");
+        assert!(
+            written.contains("missingSubprotocol"),
+            "the one write carries the body too: {written}"
+        );
+        assert!(
+            written.ends_with("no jmap\"}"),
+            "the write ends with the body, not with the head: {written}"
+        );
+    }
 }

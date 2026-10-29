@@ -198,6 +198,7 @@ stream is open, and the one ordering rule that makes it deterministic.
 | `handle().mutate_from_elsewhere(\|store\| { …; vec!["Mailbox"] })` | runs a closure against the store, then publishes the returned types at their new state — what a real `*/set` does |
 | `handle().push_email(json)` / `push_email_of(id)` | publishes an `EmailPush` (of an existing fixture email) |
 | `handle().push_subscriber_count()` / `last_push_id()` | how many streams are attached; the current high-water event id |
+| `handle().keepalive_count()` | how many `ping` frames the SSE leg has written — the only way to observe a keepalive, since the client's parser drops them (Finding #81) |
 
 `pushState` **is** the push event id: a single monotonic counter in `PushBus`.
 So `Last-Event-ID: N` on SSE and `WebSocketPushEnable{pushState:"N"}` on WS
@@ -206,11 +207,14 @@ resume from exactly the same point, and neither can replay a notification twice.
 **Ordering rule.** `WebSocketPushEnable`/`WebSocketPushDisable` get no reply of
 their own, so a push published straight after sending one can overtake it and be
 dropped before the session is switched on. Synchronise through the socket first:
-send any `Core/echo` request after the enable and wait for its `Response` — the
-socket is ordered, so the enable has been handled. `p2_streams.rs` wraps this as
-`enable_push(ws, dataTypes, pushState)` / `disable_push(ws)`; P7 should reuse the
-pattern. SSE needs no such handshake: the stream is live the moment the 200
-arrives, and `wait_for_subscribers(handle, n)` makes that observable.
+send any request after the enable and wait for its `Response` — the socket is
+ordered, so the enable has been handled. (The RFC's natural probe, `Core/echo`,
+is *not* sendable: `core::request::Arguments` has no `Echo` variant — Finding
+#84. `tests/websocket.rs` uses a `Mailbox/get`.) `p2_streams.rs` wraps this as
+`enable_push(ws, dataTypes, pushState)` / `disable_push(ws)`; P7 reuses the
+pattern as its own `sync(client, stream)` helper. SSE needs no such handshake:
+the stream is live the moment the 200 arrives, and `wait_for_subscribers(handle, n)`
+makes that observable.
 
 #### Wiremock fixture API (for P3–P6)
 
@@ -281,17 +285,31 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
       (`/queryChanges`) — not §5.1 as the task brief assumed.
 - [x] Verify + commit — P3 closed by this increment (28 + 23 tests green).
 
-### P3-followup — mock-jmap WS handshake flake (fix before P7) ⬜
-- `websocket_refuses_a_connection_that_offers_no_subprotocol` intermittently
-  reads an empty rejection body (~1 in 3 under full-suite load; 5/5 green in
-  isolation — orchestrator confirmed). Root cause: the mock writes the
-  problem+json rejection but may close the socket before the body flushes.
-  P7 depends on reliable WS handshake assertions — fix the mock to flush/await
-  the write before closing. Owner: P7 agent.
-  P6 re-measured it (Finding #77): 4 failures in 9 full-suite runs with the
-  P6 test files present, 2 in 5 with them stashed away — the same rate, and
-  the flake passes in isolation. It is purely a mock-side race; no client
-  test increment moves it.
+### P3-followup — mock-jmap WS handshake flake (fix before P7) ✅
+
+- Fixed in P7 (Finding #78). `websocket_refuses_a_connection_that_offers_no_subprotocol`
+  intermittently read an empty rejection body.
+  **Root cause, read out of tungstenite 0.29
+  `src/handshake/client.rs`:** on a refused handshake the client stores
+  `*e.body_mut() = Some(tail)` — the bytes still sitting in the read buffer at
+  the moment the response *head* parsed. The mock wrote the head and the body
+  with two separate `write_all` calls, so they could leave as two TCP segments;
+  when the head parsed before the body arrived the "tail" was empty and the
+  rejection body came back `""`. Not a flush race in the usual sense: the bytes
+  were flushed, they just arrived later than the parse.
+  **Fix:** `mock-jmap/src/http.rs::write_response` is now generic over
+  `S: AsyncWrite + Unpin` and composes status line + headers + body into **one**
+  `write_all`, followed by a single `flush` and then the shutdown. Locked in by
+  the unit test `http::tests::write_response_emits_head_and_body_in_one_write`
+  (a `RecordingSink` that fails if the response is written in more than one
+  call).
+  **Evidence:** 8 consecutive full `cargo test -p mock-jmap` runs green
+  (1 lib + 41 `p2_streams` + 35 `self_tests` + 4 doctests) before the P7 test
+  files existed, plus 5 more after — **13 full-suite runs, 0 flakes** — and 20
+  targeted `--test p2_streams websocket_refuses` runs, 0 failures. Against the
+  4-in-9 / 2-in-5 rate P6 recorded, the flake is gone.
+  The same single-write reasoning was applied to the SSE `write_chunk` (see
+  Finding #79).
 
 ### P4 — Integration tests: mail domain  ✅
 - [x] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
@@ -453,12 +471,65 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
         builder.
 - [x] Verify + commit — P6 closed by this increment (74 new tests green).
 
-### P7 — Integration tests: push streams  ⬜
-- [ ] tests/event_source.rs (stream consumption, types filter, closeafter,
-      Last-Event-ID, error mid-stream)
-- [ ] tests/websocket.rs (connect_ws, send_ws correlation, enable/disable push,
-      ws_ping, RequestError → ProblemDetails, not-connected errors)
-- [ ] Verify + commit
+### P7 — Integration tests: push streams ✅
+
+- [x] `tests/event_source.rs` — **11 tests** (9 `#[tokio::test]` + 2 plain),
+      driven by `Client::event_source()` against the mock's real
+      `GET /eventSource` leg (the wiremock layer cannot reach a server-pushed
+      stream):
+      * delivery — `StateChange` arrives with its SSE `id`, the changed account,
+        the `{DataType → state}` map, `has_type`/`is_empty`, and the draining
+        `account_changes()` semantics;
+      * `types=` filter — an Email change published to a `Mailbox`-only stream
+        is never delivered (proved by asserting the *next* wanted event's id,
+        not by sleeping for silence);
+      * `closeafter=state` — the closing event is the state change itself, then
+        the stream ends (`next() → None`) and the mock's subscriber drops to 0;
+      * `ping=1` — the keepalive is observed through the mock's
+        `keepalive_count()` (the client's parser swallows pings, Finding #81)
+        and the stream still delivers afterwards;
+      * `Last-Event-ID` resume — replaying from `"1"` yields exactly id 2 then
+        live 3 with no gap or overlap; a token ahead of the bus (`"99"`)
+        replays nothing;
+      * URL templating — the query is asserted verbatim:
+        `types=Mailbox,Email&closeafter=state&ping=45` and the default
+        `types=*&closeafter=no&ping=0` (Finding #82);
+      * Finding #16 documented from the client side — `EmailPush` over SSE
+        surfaces as `Error::Internal("Unexpected PushObject variant: …")` and
+        **the stream survives** and keeps delivering;
+      * two sync tests over `Changes` built by hand (accessor round-trip,
+        empty-value semantics, Finding #83).
+- [x] `tests/websocket.rs` — **15 tests**, driven by `Client::connect_ws()` /
+      `send_ws()` / `enable_push_ws()` / `disable_push_ws()` / `ws_ping()`
+      against the mock's RFC 8887 leg:
+      * request/response — `requestId` correlation, two sequential requests
+        with distinct ids, `sessionState` present on every `Response`;
+      * push — `enable_push_ws` state change delivery, `dataTypes` filtering,
+        `disable_push_ws` stopping delivery, a socket that never enabled push
+        receiving nothing, `EmailPush` via `push_email_of("em_1")` and via an
+        explicit `push_email` payload (the RFC 8621 notification the SSE leg
+        cannot carry);
+      * `ws_ping` round-trip without breaking the stream;
+      * errors — a `RequestError` frame (forced with the unadvertised
+        `URI::Contacts` via `Request::add_capability`) surfaces as
+        `Error::Problem` / `unknownCapability` **and the socket stays usable**;
+        a method-level error inside a `Response` is contrasted with it;
+      * not-connected errors for `send_ws`/`enable_push_ws`/`disable_push_ws`/
+        `ws_ping` (`"Websocket stream not set."`), and `connect_ws` against a
+        session with the websocket capability stripped out
+        (`"JMAP server does not advertise any websocket capabilities."`);
+      * the handshake request is logged on `/ws`.
+      Every enable/disable is followed by the echo-synchronisation frame of
+      Finding #22 (`WebSocketPushEnable`/`Disable` get no reply of their own),
+      so no push can overtake the switch.
+- [x] Verify + commit — P7 closed by this increment (26 new tests green).
+      `cargo test -p jmap-client` green ×3, `cargo test -p mock-jmap` green ×5
+      on top of the 8 earlier runs, `cargo clippy -p jmap-client --all-targets`
+      clean for `tests/` (the only warnings are the 7 pre-existing
+      `mock-jmap` lib ones plus 5 pre-existing in P4/P6 test files), coverage
+      summary lists only `src/` rows. **TOTAL 75.64% → 80.25% lines.**
+      The P3-followup flake is fixed (box above). New contract facts recorded
+      as Findings 78–84.
 
 ### P8 — Unit tests: pure logic in src  ⬜
 - [ ] lib.rs: URI/DataType/Method serde + Display round-trips, Error variants
@@ -485,6 +556,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 5 | 2026-10-28 | P4: mail-domain wiremock integration tests — `tests/mailbox.rs` (26), `tests/email.rs` (37), `tests/thread.rs` (11), `tests/search_snippet.rs` (11). Drives every `Client::mailbox_*` / `Client::email_*` / `Client::thread_get` / `Client::search_snippet_get` helper plus the matching `Request::` builders against RFC-verbatim 8621/8620 fixtures; each test owns its `MockServer` and asserts the method name went on the wire. | **46.31%** lines (6953 instr., 3220 covered) — **+24.05 pp / +1672 lines** over P3's 22.26% | **145 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `mailbox/helpers.rs`, `thread/{get,helpers,mod}.rs` and `email/search_snippet.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 39–52. |
 | 6 | 2026-10-28 | P5: submission / identity / vacation wiremock integration tests — `tests/email_submission.rs` (27), `tests/identity.rs` (22), `tests/vacation_response.rs` (18). Drives every `Client::email_submission_*` / `Client::identity_*` / `Client::vacation_response_*` helper plus the matching `Request::` builders and `unwrap_*` accessors against RFC-verbatim 8621 §6/§7/§8 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **59.14%** lines (6953 instr., 4112 covered) — **+12.83 pp / +892 lines** over P4's 46.31% | **212 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green (212), `cargo test -p mock-jmap` green (80), `cargo clippy -p jmap-client --all-targets` clean for `tests/` (all 7 warnings are the pre-existing `mock-jmap` lib ones — none in `src/` or `tests/`), coverage summary lists only `src/` rows. All 13 target modules went from 0.00%; `email_submission/query.rs` and `vacation_response/get.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 53–65. |
 | 7 | 2026-10-29 | P6: sieve / principal / push_subscription / blob wiremock integration tests — `tests/principal.rs` (25), `tests/sieve.rs` (22), `tests/push_subscription.rs` (15), `tests/blob.rs` (12). Drives every `Client::sieve_script_*` / `Client::principal_*` / `Client::push_subscription_*` helper plus `Client::{upload,download,blob_copy}`, the matching `Request::` builders and `unwrap_*` accessors, against RFC 8620 §6.1–§6.3/§7.2, draft-ietf-jmap-sieve-12 §2 and RFC 9670 §4 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **75.64%** lines (6953 instr., 5259 covered) — **+16.50 pp / +1147 lines** over P5's 59.14% | **286 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 new) · mock-jmap 41 P2 + 35 P1 + 4 doctests pass, 1 known flake | Verified: `cargo test -p jmap-client` green (286), `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` lists only `src/` rows, `cargo test -p mock-jmap` green apart from the pre-existing WS-handshake flake of the P3-followup box (Finding #77). 18 of the 20 target modules went from 0.00%; `blob/copy.rs` and `sieve/validate.rs` reached 100%. No `src/` file was modified. Regions 56.93% → 73.14%, functions 57.85% → 73.97%. New contract facts recorded as Findings 66–77. The flake reproduces at the same rate with and without the P6 files (4/9 vs 2/5 full-suite runs), confirming it is independent of this increment. |
+| 8 | 2026-10-29 | P7: push-stream integration tests — `tests/websocket.rs` (15) + `tests/event_source.rs` (11), plus the P3-followup fix of the mock's WS-handshake write. Drives `Client::{connect_ws,send_ws,enable_push_ws,disable_push_ws,ws_ping,event_source}` and the RFC 8887 `WebSocketMessage` / RFC 8620 §7.3 `PushNotification`+`Changes` surfaces against the mock's own WebSocket and SSE legs: requestId correlation, `dataTypes`/`types=` filtering, `closeafter=state`, `ping` keepalive, `Last-Event-ID`/`pushState` resume, `EmailPush` delivery over WS only, `RequestError`→`ProblemDetails` vs a method error, and the not-connected error set. | **80.25%** lines (6953 instr., 5580 covered) — **+4.61 pp / +321 lines** over P6's 75.64% | **312 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 new) · mock-jmap 41 P2 + 35 P1 + 1 lib + 4 doctests pass, **0 flakes** | Verified: `cargo test -p jmap-client` green ×3 (312), `cargo test -p mock-jmap` green ×5 on top of the 8 post-fix runs (13 total, 0 flakes), `cargo clippy -p jmap-client --all-targets` clean for the two new files, coverage summary lists only `src/` rows. `event_source/stream.rs` reached **100.00%**, `event_source/mod.rs` 16.67% → **97.22%**, `client_ws.rs` 0.00% → **69.27%**, `event_source/parser.rs` 71.35% → **86.98%**. Regions 73.14% → 76.80%, functions 73.97% → 76.86%. No `src/` file was modified; `mock-jmap/` was (allowed: the flake fix + keepalive/`query` observability hooks). The P3-followup box is closed — see Findings #78/#79. New contract facts recorded as Findings 78–84. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -677,6 +749,47 @@ mostly the `unwrap_*` accessors of domains no test batch-drives),
 `email/query.rs`. The 80% goal is within reach of P7 alone: `client_ws.rs`
 (192 lines) plus `event_source/*` are the largest single untouched block
 left.
+
+#### P7 per-file line-coverage delta
+
+Against the state after P6 (`75.64%` / 5259 lines covered), re-measured with
+the two P7 files removed from `tests/`. Instrumented total unchanged at
+6953 lines.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `event_source/stream.rs` | 0.00% | **100.00%** | +100.00 | 0 → 77 (+77) |
+| `event_source/mod.rs` | 16.67% | **97.22%** | +80.55 | 6 → 35 (+29) |
+| `client_ws.rs` | 0.00% | **69.27%** | +69.27 | 0 → 133 (+133) |
+| `core/error.rs` | 47.50% | **72.50%** | +25.00 | 38 → 58 (+20) |
+| `event_source/parser.rs` | 71.35% | **86.98%** | +15.63 | 137 → 167 (+30) |
+| `lib.rs` | 36.99% | **49.32%** | +12.33 | 27 → 36 (+9) |
+| `core/response.rs` | 27.27% | **31.70%** | +4.43 | 117 → 136 (+19) |
+| `client.rs` | 83.13% | **84.05%** | +0.92 | 271 → 274 (+3) |
+| `core/request.rs` | 92.02% | **92.23%** | +0.21 | 450 → 451 (+1) |
+| **TOTAL** | **75.64%** | **80.25%** | **+4.61** | **5259 → 5580 (+321)** |
+
+Of the +321 lines, 269 are the four P7 target modules
+(`client_ws.rs` +133, `event_source/{stream,parser,mod}.rs` +77/+30/+29)
+and 52 are shared plumbing the streams happen to cross: `core/error.rs`
+(+20 — the `ProblemDetails`/`ProblemType` path a `RequestError` frame takes,
+plus `Error::Internal`/`Error::WebSocket` variants), `core/response.rs`
+(+19 — the `Response`/`TaggedMethodResponse` leg the WS `Response` frame
+deserialises into), `lib.rs` (+9 — `PushObject::EmailPush` deserialisation
+and the `DataType`/`Error` Display arms) and `client.rs`/`core/request.rs`
+(+4 — the `event_source_url` accessor and the forced-capability request).
+
+Regions moved 73.14% → 76.80% and functions 73.97% → 76.86% over the same
+increment.
+
+**The ≥ 80% line-coverage goal is met** (80.25%) three phases early. What is
+left cold is not stream code: `core/response.rs` (31.70%, the `unwrap_*`
+accessors of domains no batch drives), `email/query.rs` (21.38%),
+`core/copy.rs` (61.84%), `core/error.rs` (72.50%) and the ~40 lines of
+`client_ws.rs` that need a real `wss://` endpoint — the
+`DummyVerifier`/TLS-config arm (`client_ws.rs:~40` lines) cannot be reached
+over the mock's plain `ws://` socket without touching `src/`. P8/P9 are now
+polish, not a rescue.
 
 ## Findings log
 
@@ -1161,3 +1274,93 @@ tests._
     P3-followup box; not fixed here because `mock-jmap/` is protected by
     the content-protection rule. P7 must either fix the mock's flush or
     tolerate this one test.
+ 78. **A refused WS handshake reports only the bytes that were already in the
+    read buffer when the head parsed — so a rejection body must be written in
+    one call.** tungstenite 0.29 `src/handshake/client.rs` answers a rejected
+    upgrade with `*e.body_mut() = Some(tail)`, where `tail` is whatever is
+    left in the buffer at the instant the response *head* completes parsing.
+    The mock's old `write_response` did `write_all(head)` then
+    `write_all(body)`, which the OS is free to ship as two segments; when the
+    head parsed first the tail was empty and
+    `websocket_refuses_a_connection_that_offers_no_subprotocol` saw
+    `got: ` — an empty rejection body. This is *not* the usual "closed before
+    flushing" race: the bytes were flushed, they just arrived after the parse.
+    Fixed in `mock-jmap/src/http.rs` by composing status line + headers +
+    body into a single `write_all` before one `flush`, and pinned by
+    `http::tests::write_response_emits_head_and_body_in_one_write`.
+    Measured after the fix: **13 consecutive full `cargo test -p mock-jmap`
+    runs, 0 flakes** (against P6's 4-in-9 / 2-in-5), and 20 targeted
+    `websocket_refuses` runs, 0 failures. Client-side lesson: never assert on
+    a rejection body the server wrote in more than one syscall.
+ 79. **`EventParser::push_bytes` replaces the buffer, it does not append —
+    so one SSE event must be exactly one chunk.**
+    `src/event_source/parser.rs:55` is `self.bytes = Some(bytes)`, and
+    `needs_bytes()` gates the next read. An event split across two reads
+    therefore loses its first half outright (the second `push_bytes`
+    overwrites it), and the client silently drops a notification rather than
+    reporting a parse error. The mock's `PushEvent::to_sse` is built to match:
+    one event, one line of `data:`, written by a single `write_chunk` — the
+    same single-write rule as Finding #78, for a different reason. Any future
+    mock work that batches SSE events, or any real proxy that re-chunks the
+    stream, breaks the client's parser invisibly.
+ 80. **`connect_ws` throws away the `pushState` of every push frame, so a WS
+    push notification cannot be used to resume.** RFC 8887 §4.3.5.1 puts
+    `pushState` on the `StateChange` push frame precisely so the client can
+    reconnect from it, and the mock sends it
+    (`PushEvent::to_ws_frame` inserts `pushState`). But
+    `WebSocketMessage::PushNotification(push.push)` in `src/client_ws.rs`
+    unwraps the `PushObject` and discards the sibling member, so the state
+    never reaches the caller and cannot be fed back into
+    `enable_push_ws(_, _, Some(state))`. A client that wants to resume must
+    poll `Session`/`Core/get` instead of listening to its own push stream.
+    `tests/websocket.rs` asserts the notification *content* only; the lost
+    `pushState` is asserted nowhere because nothing can observe it.
+ 81. **SSE keepalives are invisible to the caller: the parser drops
+    `event: ping` unless the `debug` feature is on.**
+    `filter_notification` matches `EventType::Ping` and, without
+    `#[cfg(feature = "debug")]`, falls through the `match` without returning —
+    the event vanishes. A test (or an application) watching the stream cannot
+    tell "keepalive arrived" from "connection wedged". P7 works around it
+    mock-side: `PushBus::record_keepalive()` is called *after* the frame is
+    written, and `MockHandle::keepalive_count()` is what
+    `a_ping_keepalive_is_written_and_the_stream_keeps_delivering` waits on.
+    With `debug` on, the same frame surfaces as a
+    `PushNotification::StateChange` whose account key is the literal
+    `"ping"` with an empty type map — a shape no caller is written to expect.
+ 82. **`Client::event_source`'s parameters are not what the RFC's names
+    suggest, and the defaults are load-bearing.** The signature is
+    `(Option<impl IntoIterator<Item = DataType>>, bool, Option<u32>,
+    Option<&str>)`: `close_after_state` is a **bool** that maps to the literal
+    `state`/`no` in the URL, and `ping` is whole **seconds** — so the
+    smallest keepalive a caller can ask for is 1 s (`ping=0` means "server
+    picks", and the mock floors it at 20 ms while RFC 8620 §7.3 suggests
+    300 s). `types=None` emits `types=*`. The whole query is asserted
+    verbatim in two P7 tests:
+    `types=Mailbox,Email&closeafter=state&ping=45` and
+    `types=*&closeafter=no&ping=0`. Note the type names are the `DataType`
+    **Display** strings (`Mailbox`, `Email`), not the `urn:ietf:params:jmap:*`
+    URNs used in `using:` — a server that matches on URNs here sees nothing.
+ 83. **`Changes::account_changes()` drains, and `is_empty()` reads the type
+    maps rather than the account keys.**
+    `account_changes` is `self.changes.remove(account_id)`
+    (`src/event_source/mod.rs:57`): the second call for the same account
+    returns `None`, and after draining every account `is_empty()` is `true`
+    even though the notification was full when it arrived. Conversely
+    `is_empty()` is `!self.changes.values().any(|c| !c.is_empty())`, so an
+    account mapped to an *empty* map counts as no change at all —
+    `changed_accounts()` can list an account that `is_empty()` ignores.
+    Both are deliberate-looking but surprising; the two sync tests in
+    `tests/event_source.rs` pin the exact semantics so a future refactor
+    cannot quietly turn the drain into a getter.
+ 84. **The client cannot send `Core/echo`, so `Mailbox/get` is the WebSocket
+    synchronisation frame — and a forced unadvertised capability leaves the
+    socket usable.** RFC 8887 §4.3.4 defines `Core/echo` as the natural
+    round-trip probe, but `core::request::Arguments` has no `Echo` variant, so
+    `tests/websocket.rs` uses a `Mailbox/get` as the ordered echo that proves
+    a preceding `WebSocketPushEnable`/`Disable` was processed (Finding #22).
+    Separately, a `RequestError` frame is reachable by forcing a capability the
+    session does not advertise — `Request::add_capability(URI::Contacts)` —
+    and it surfaces as `Error::Problem` with `unknownCapability` while the
+    socket stays open and keeps answering later requests. That is the
+    contrast the tests draw against a method-level error inside a normal
+    `Response`: one kills nothing, and neither closes the connection.

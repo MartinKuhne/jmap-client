@@ -46,7 +46,7 @@
 //!
 //! * [`MockJmapServer`] — start/stop, urls, port, request log.
 //! * [`MockHandle`] — cloneable control handle: fault injection, store access.
-//! * [`RequestRecord`] — one recorded request (`method`, `path`, `body`).
+//! * [`RequestRecord`] — one recorded request (`method`, `path`, `query`, `body`).
 //! * [`session::session_json`] — the session document, also useful standalone.
 //! * [`problem`] — builders for problem documents and method errors.
 //!
@@ -98,6 +98,10 @@ pub struct RequestRecord {
     pub method: String,
     /// Request path (no query string).
     pub path: String,
+    /// Raw query string, `None` when the request target had no `?`. Recorded so
+    /// a test can assert on the parameters a client built into a templated URL
+    /// (RFC 8620 §7.3's `types`/`closeafter`/`ping`, for instance).
+    pub query: Option<String>,
     /// Raw request body.
     pub body: Vec<u8>,
 }
@@ -371,6 +375,16 @@ impl MockHandle {
         self.inner.lock().unwrap().push.subscriber_count()
     }
 
+    /// How many keepalive (`ping`) frames the EventSource leg has written.
+    ///
+    /// `jmap_client`'s SSE parser drops ping events unless the `debug` feature
+    /// is on, so a keepalive is invisible on the client side. This counter is
+    /// how a test waits for one that really happened instead of sleeping for an
+    /// interval it hopes is long enough.
+    pub fn keepalive_count(&self) -> usize {
+        self.inner.lock().unwrap().push.keepalive_count()
+    }
+
     /// Id of the most recent push event, 0 if nothing has been pushed.
     pub fn last_push_id(&self) -> u64 {
         self.inner.lock().unwrap().push.last_id()
@@ -554,6 +568,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Mutex<Share
             .push(RequestRecord {
                 method: raw.request.method.clone(),
                 path: raw.request.path.clone(),
+                query: raw.request.query.clone(),
                 body: raw.request.body.clone(),
             });
         websocket::serve(shared, stream, raw).await;
@@ -566,6 +581,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Mutex<Share
         guard.log.push(RequestRecord {
             method: request.method.clone(),
             path: request.path.clone(),
+            query: request.query.clone(),
             body: request.body.clone(),
         });
         route(&mut guard, &request)

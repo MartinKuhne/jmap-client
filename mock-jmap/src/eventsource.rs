@@ -194,9 +194,10 @@ pub async fn serve(
         .header("last-event-id")
         .and_then(|value| value.trim().parse::<u64>().ok());
 
-    let (mut receiver, replay) = {
+    let (mut receiver, replay, bus) = {
         let bus = shared.lock().expect("mock-jmap: shared state poisoned").push.clone();
-        bus.subscribe(since)
+        let (receiver, replay) = bus.subscribe(since);
+        (receiver, replay, bus)
     };
 
     http::write_streaming_head(stream).await?;
@@ -234,6 +235,9 @@ pub async fn serve(
             },
             _ = ticker.tick() => {
                 http::write_chunk(stream, ping_frame(params.ping).as_bytes()).await?;
+                // Counted *after* the write lands, so `keepalive_count() >= 1`
+                // always means the frame is already on the wire.
+                bus.record_keepalive();
             }
         }
     }

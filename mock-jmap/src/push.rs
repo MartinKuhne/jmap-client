@@ -25,6 +25,7 @@
 //! receives exactly the events with id > 7 that are still in the history ring.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
@@ -206,6 +207,12 @@ impl PushEvent {
 #[derive(Debug, Clone)]
 pub struct PushBus {
     inner: Arc<Mutex<BusInner>>,
+    /// Keepalive (`ping`) frames written by the EventSource leg. Kept outside
+    /// [`BusInner`] because it is not part of the event stream: a counter a
+    /// test can poll is the only way to *observe* a keepalive, since
+    /// `jmap_client`'s parser drops ping events unless the `debug` feature is
+    /// on.
+    keepalives: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -231,6 +238,7 @@ impl PushBus {
                 history: VecDeque::new(),
                 next_id: 1,
             })),
+            keepalives: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -310,6 +318,20 @@ impl PushBus {
             .expect("mock-jmap: push bus poisoned")
             .tx
             .receiver_count()
+    }
+
+    /// Records that one keepalive (`ping`) frame was written to a stream.
+    ///
+    /// Called by the EventSource leg. A test that wants to prove a keepalive
+    /// happened waits on [`PushBus::keepalive_count`] instead of sleeping for
+    /// an guessed interval.
+    pub fn record_keepalive(&self) {
+        self.keepalives.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// How many keepalive frames have been written since the bus was created.
+    pub fn keepalive_count(&self) -> usize {
+        self.keepalives.load(Ordering::Relaxed)
     }
 }
 
