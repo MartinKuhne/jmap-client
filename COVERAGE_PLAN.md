@@ -625,6 +625,37 @@ Closing these needs a transport-level seam, not more unit tests.
 
 All tests are pure: no `MockServer`, no sockets, no `async`.
 
+**Final reconciliation (P8 → P12).** The goal was 80%; it was cleared at P7
+(80.25%) and then driven up on the user's "keep driving" instruction:
+P8 90.19% → P9 96.30% → P10 97.61% → P11 98.19% → **P12 99.17% lines**
+(11335/11430; 95 uncovered). 612 client tests + 81 `mock-jmap` tests green,
+`clippy` clean in `src/`, every `src/` change insertions-only.
+
+The residual 95 lines are the **hard floor** — not reachable without changing
+production code or a live transport:
+- `core/request.rs` 245–471 — 34 `_ => unreachable!()` arms of the
+  `Arguments::*_mut()` accessors (panic by design; no `#[should_panic]`
+  written against them — that tests the panic, not behaviour).
+- four `SetObject::new()` `unimplemented!()` pairs (`email`/`email_submission`
+  /`mailbox`/`principal` `set.rs`) — the `<Get>` flavour is never constructed.
+- `client.rs` 226–248 / 366–378 / 431 / 478 — the two `redirect::Policy::custom`
+  closure bodies and the non-`problem+json` decoder arms; need a real HTTP 3xx
+  or a live `reqwest::Response`.
+- `client_ws.rs` 236–248 — the `wss://` + accept-invalid-certs dial (the
+  `DummyVerifier` it installs is covered directly; only the TLS dial is cold).
+- `core/session.rs` 499/521, `core/set.rs` 403 — test-helper / never-taken
+  continuation and a `Formatter`-never-errors `?` path.
+
+**Real client hazard surfaced (Finding #112, NOT fixed — out of scope):**
+`SingleMethodResponse` is `#[serde(untagged)]` with the `Error` arm first and
+`MethodErrorType` is a closed enum, so an error `Invocation` carrying an
+unmodelled type (e.g. `tooManySubscriptions`) fails the `Error` arm and then
+**succeeds as `Ok`** when the payload type has all-optional members — so
+`send_set_mailbox()` can return an all-`None` `Ok` and silently swallow the
+server's refusal. Pinned by a test in `tests/core_methods.rs`. A fix would be
+an `Other(String)` arm on `MethodErrorType` (or an internally-tagged enum);
+left for the maintainers per the "characterise, don't fix non-test code" rule.
+
 ### P10 — Final in-crate unit sweep of the remaining cold pure logic ✅
 
 P9 left 379 uncovered lines in `src/`. P10 took the ones that are *pure* —
