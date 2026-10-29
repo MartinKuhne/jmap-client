@@ -310,3 +310,180 @@ impl<T> Filter<T> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the generic `*/query` request builder and the
+    //! filter-combinator constructors (RFC 8620 §5.5).
+
+    use super::*;
+    use crate::{
+        mailbox::{query::Filter as MailboxFilter, Mailbox},
+        Set,
+    };
+    use serde_json::json;
+
+    /// RFC 8620 §5.5 — `accountId` starts from whatever the
+    /// `RequestParams` carried and the setter replaces it in place,
+    /// leaving every other member of the request untouched.
+    #[test]
+    fn account_id_setter_replaces_the_account_the_params_carried() {
+        let mut request = QueryRequest::<Mailbox<Set>>::new(RequestParams::new(
+            "u33084183",
+            Method::QueryMailbox,
+            0,
+        ));
+        assert_eq!(request.account_id, "u33084183");
+
+        // `impl Into<String>` takes an owned string without a copy
+        let owned: String = "ue411d190".into();
+        request.account_id(owned);
+        assert_eq!(request.account_id, "ue411d190");
+
+        // the setter hands back `&mut Self`, so calls chain
+        request.account_id("a").account_id("b");
+        assert_eq!(request.account_id, "b");
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "accountId": "b",
+                "sortAsTree": false,
+                "filterAsTree": false
+            }),
+            "with no criteria set the request carries the account plus the \
+             flattened Mailbox extension, whose two plain `bool` members are \
+             always on the wire (Finding #35)"
+        );
+    }
+
+    /// RFC 8620 §5.5 — the two `From` impls decide which arm of the
+    /// untagged `Filter` enum a value lands in: an operator tree goes to
+    /// `FilterOperator`, a bare condition to `FilterCondition`. They are
+    /// what lets `QueryRequest::filter` accept `impl Into<Filter<T>>`.
+    #[test]
+    fn the_from_impls_pick_the_matching_filter_arm() {
+        let conditions: Vec<Filter<MailboxFilter>> =
+            vec![MailboxFilter::is_subscribed(true).into()];
+        let operator = FilterOperator {
+            operator: Operator::And,
+            conditions,
+        };
+
+        let filter: Filter<MailboxFilter> = operator.clone().into();
+        assert!(
+            matches!(filter, Filter::FilterOperator(_)),
+            "`From<FilterOperator<T>>` must land in the operator arm"
+        );
+        assert_eq!(
+            serde_json::to_value(&filter).unwrap(),
+            json!({ "operator": "AND", "conditions": [{ "isSubscribed": true }] })
+        );
+
+        // the builder takes the very same `From` impl for a raw operator
+        let mut request = QueryRequest::<Mailbox<Set>>::new(RequestParams::new(
+            "u33084183",
+            Method::QueryMailbox,
+            1,
+        ));
+        request.filter(operator);
+        assert!(
+            matches!(request.filter, Some(Filter::FilterOperator(_))),
+            "passing a `FilterOperator` to the builder must not wrap it twice"
+        );
+
+        let condition: Filter<MailboxFilter> = MailboxFilter::name("INBOX").into();
+        let wrapped = matches!(
+            condition,
+            Filter::FilterCondition(MailboxFilter::Name { .. })
+        );
+        assert!(wrapped, "`From<T>` must land in the condition arm");
+        assert_eq!(
+            serde_json::to_value(&condition).unwrap(),
+            json!({ "name": "INBOX" })
+        );
+    }
+
+    /// RFC 8620 §5.5 — `Filter::operator` builds an arbitrary
+    /// AND/OR/NOT tree. Each level serialises as its own
+    /// `{operator, conditions}` object and `conditions` holds filters of
+    /// exactly the same shape, so the nesting is unbounded.
+    #[test]
+    fn operator_builds_an_arbitrary_and_or_not_tree() {
+        assert_eq!(serde_json::to_value(Operator::And).unwrap(), json!("AND"));
+        assert_eq!(serde_json::to_value(Operator::Or).unwrap(), json!("OR"));
+        assert_eq!(serde_json::to_value(Operator::Not).unwrap(), json!("NOT"));
+
+        let inbox: Filter<MailboxFilter> = MailboxFilter::name("INBOX").into();
+        let subscribed: Filter<MailboxFilter> = MailboxFilter::is_subscribed(true).into();
+        let and_group: Filter<MailboxFilter> = Filter::and([inbox.clone(), subscribed.clone()]);
+        let not_group: Filter<MailboxFilter> =
+            Filter::operator(Operator::Not, vec![subscribed.clone()]);
+        let tree: Filter<MailboxFilter> =
+            Filter::operator(Operator::Or, vec![and_group, not_group]);
+
+        assert_eq!(
+            serde_json::to_value(&tree).unwrap(),
+            json!({
+                "operator": "OR",
+                "conditions": [
+                    {
+                        "operator": "AND",
+                        "conditions": [
+                            { "name": "INBOX" },
+                            { "isSubscribed": true }
+                        ]
+                    },
+                    {
+                        "operator": "NOT",
+                        "conditions": [{ "isSubscribed": true }]
+                    }
+                ]
+            })
+        );
+
+        // an operator with no conditions is still a well-formed filter
+        assert_eq!(
+            serde_json::to_value(Filter::<MailboxFilter>::operator(Operator::And, Vec::new()))
+                .unwrap(),
+            json!({ "operator": "AND", "conditions": [] })
+        );
+    }
+
+    /// RFC 8620 §5.5 — a filter built with `Filter::operator` survives
+    /// being handed to the request builder, which is the only way a
+    /// caller gets a nested tree onto the wire.
+    #[test]
+    fn a_nested_operator_reaches_the_wire_through_the_builder() {
+        let inbox: Filter<MailboxFilter> = MailboxFilter::name("INBOX").into();
+        let any_role: Filter<MailboxFilter> = MailboxFilter::has_any_role(true).into();
+        let inner: Filter<MailboxFilter> = Filter::or([inbox, any_role]);
+        let outer: Filter<MailboxFilter> = Filter::operator(Operator::Not, vec![inner]);
+
+        let mut request = QueryRequest::<Mailbox<Set>>::new(RequestParams::new(
+            "u33084183",
+            Method::QueryMailbox,
+            2,
+        ));
+        request.filter(outer).limit(25);
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "accountId": "u33084183",
+                "filter": {
+                    "operator": "NOT",
+                    "conditions": [
+                        {
+                            "operator": "OR",
+                            "conditions": [{ "name": "INBOX" }, { "hasAnyRole": true }]
+                        }
+                    ]
+                },
+                "limit": 25,
+                "sortAsTree": false,
+                "filterAsTree": false
+            })
+        );
+    }
+}

@@ -678,6 +678,67 @@ TLS WebSocket endpoint). Those, plus the residual macro-attribution
 artefacts in `core/{copy,get}.rs`, are the whole remaining gap in the
 files this phase touched.
 
+### P11 — Final in-crate unit sweep of the remaining cold pure logic ✅
+
+P10 left 257 uncovered lines in `src/`. P11 took the six files whose
+residual was *pure* builder, combinator and parser-branch code — read off
+`--show-missing-lines`, not the summary column — and closed every one of
+them to **100.00% lines**. No network, no mock server, no `async`:
+values constructed through the fluent API and raw SSE byte sequences
+pushed straight into the parser, exactly as in P8/P9/P10.
+
+- [x] **Group A — query / changes builders and filter combinators.**
+      `core/query.rs` (4 tests): the `account_id()` override on the
+      `*/query` request, the two `From` impls that decide which arm of
+      the untagged `Filter` a value lands in, `Filter::operator`
+      building an arbitrary AND/OR/NOT tree, and that tree reaching the
+      wire through `QueryRequest::filter` (RFC 8620 §5.5).
+      `core/query_changes.rs` (3): the `account_id()` override, the full
+      RFC 8620 §5.6 / RFC 8621 §2.4 request with every optional member
+      set, and the independence of `upToId` from `maxChanges`.
+      `core/changes.rs` (2): the `account_id()` override on the
+      `*/changes` request plus the three `/created` `/updated`
+      `/updatedProperties` reference helpers (RFC 8620 §3.6).
+      `mailbox/query.rs` (4): `Filter::role` mapping `Role::None` to an
+      explicit JSON `null` rather than the empty string `Role` itself
+      writes, the `parentId` `Option` pass-through, all three comparator
+      constructors, and a whole tree-shaped `Mailbox/query`
+      (RFC 8621 §2.3).
+      `principal/query.rs` (4): `Comparator::ptype` and `Filter::ptype`,
+      a nine-condition sweep of every `PrincipalFilter` variant, and a
+      whole `Principal/query` with anchor windowing (RFC 9670 §4.4).
+- [x] **Group B — the SSE parser's branch arms.**
+      `event_source/parser.rs` (11 tests added to the module P7 started):
+      `needs_bytes()` across the buffered / draining / drained states
+      (Finding #79); a `StateChange` with no `id:` reporting `None`
+      versus one carrying `"42"` verbatim (RFC 8620 §7.1); an
+      `EmailPush` payload — a *valid* `PushObject` the parser will not
+      accept — surfacing as `Error::Internal("Unexpected PushObject
+      variant…")` (Finding #16); malformed JSON in a `data:` line as
+      `Error::Parse`; the whole `CalendarAlert` arm with and without
+      `recurrenceId`, plus its own parse-error half; an unknown SSE field
+      (`retry:`) dropped without disturbing the event; CRLF framing
+      parsing exactly like LF, including a CR inside a field name; both
+      halves of the 1 MiB `MAX_EVENT_SIZE` guard (field name and field
+      value) reaching the caller through `filter_notification`; and a
+      `ping` event being swallowed whole without the `debug` feature
+      (Finding #81), asserted under both `cfg`s.
+- [x] Verify + commit — **98.19%** lines, 562 client tests green
+      (257 lib + 305 integration), 81 `mock-jmap` tests green,
+      `cargo clippy -p jmap-client --all-targets` emits **zero** warnings
+      in `src/`, and `git diff --numstat -- src` is **921 insertions /
+      0 deletions** across the six files.
+
+**The macro-attribution artefact was eliminated, not documented.** P8,
+P9 and P10 each recorded "missed lines that `--show-missing-lines`
+cannot name" — the never-taken panic continuation of a multi-line
+`assert!` / `matches!`. Binding the `matches!` result to a single-line
+`let` and asserting on the variable removes it, because the attributed
+line is the `let`, which always executes. Three such rewrites (one in
+`core/query.rs`, two in `event_source/parser.rs`) took both files from a
+1–2 line residual to a clean 100.00%. Later phases can use that shape
+instead of accepting the artefact.
+
 ## Progress log
 
 | # | Date | Action | Line cov (src) | Tests | Notes |
@@ -694,6 +755,7 @@ files this phase touched.
 | 9 | 2026-10-29 | P8: in-crate `#[cfg(test)] mod tests` unit sweep of the cold *pure* logic — `core/response.rs` (32 tests), `email/query.rs` (5), `lib.rs` (10), `core/error.rs` (8), `core/mod.rs` (1). No server, no sockets, no async: RFC-verbatim fixtures (8620 §3.4/§3.6.1.1, 8621 §4.4.1/§4.4.2) deserialised in place. Drives the whole `unwrap_*` accessor family through both its method-error and its type-mismatch arm via one macro, and every `visit_seq` guard by walking all 40 `Method` variants against a payload-less envelope. | **90.19%** lines (8285 instr., 7472 covered) — **+9.94 pp / +1892 lines** over P7's 80.25% | **385 client pass** (80 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 73 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (385), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in the five target files (the remaining ones are pre-existing in `mock-jmap` and `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Four of the five targets are now ≥ 99.58%; `email/query.rs`, `lib.rs` and `core/mod.rs` are at **100.00%**. Regions 76.80% → 88.84%, functions 76.86% → 86.57%. Diff is **insertions only** (2639 added, 0 deleted) — no existing non-test line was touched. New contract facts recorded as Findings 85–89. |
 | 10 | 2026-10-29 | P9: in-crate `#[cfg(test)] mod tests` sweep of the remaining cold *pure* logic — 12 files / 115 tests: `core/set.rs` (19), `core/session.rs` (13), `email/mod.rs` (15), `email/set.rs` (14), `email/get.rs` (11), `principal/set.rs` (9), `mailbox/set.rs` (9), `email_submission/set.rs` (7), `mailbox/mod.rs` (7), `email/parse.rs` (6), `sieve/get.rs` (3), `sieve/query.rs` (2). Drives the generic `SetRequest` create/update/destroy bookkeeping and the whole `SetErrorType` table, the `Email`/`Mailbox`/`Principal`/`EmailSubmission` patch builders and their dotted-path forms, the `take_*` draining accessors, and the three custom serde property visitors — against RFC-verbatim fixtures. Baseline re-measured by stashing the increment and re-running the same `llvm-cov` command. | **96.30%** lines (10254 instr., 9875 covered) — **+6.11 pp / +2403 lines** over P8's 90.19% | **500 client pass** (195 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (500), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 88.84% → **95.64%**, functions 86.57% → **93.74%**. Diff is **insertions only** (3195 added, 0 deleted). Six of the twelve targets reached **100.00%**; the other six are ≥ 99.00%. New contract facts recorded as Findings 90–97. |
 | 11 | 2026-10-29 | P10: in-crate `#[cfg(test)] mod tests` sweep of what P9 left cold, read off `--show-missing-lines` rather than the summary column — 11 files / 34 tests: the five domain `mod.rs` files (`email_submission` 8, `identity` 7, `push_subscription` 6, `sieve` 5, `vacation_response` 6) for the `<Get>` `requires_account_id()` arm plus the full `Display`/`Serialize`/`Deserialize` triple per property; `core/copy.rs` (6) and `core/get.rs` (7) for the fluent request builders and the `take_created` / account-gate / `result_reference` semantics; `sieve/set.rs` (5) for the create patch and the `#`-prefixed vs plain `onSuccessActivateScript` forms; `identity/get.rs` (3) for `take_id`'s drain; `client.rs` (11) for `ClientBuilder::{default,accept_invalid_certs,follow_redirects,forwarded_for}`, `Client::set_follow_redirects` and all four `Credentials` `From` impls with the base64 pinned; `client_ws.rs` (4) for `DummyVerifier`'s three hooks and its thirteen-entry `SignatureScheme` list, built offline via `Codec::read`. | **97.61%** lines (10756 instr., 10499 covered) — **+1.31 pp / +624 lines** over P9's 96.30%; uncovered 379 → **257** | **534 client pass** (229 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (534), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 95.64% → **96.67%**, functions 93.74% → **95.47%**. Diff is **insertions only** (958 added, 0 deleted). Seven of the eleven targets reached **100.00%**. All tests are pure: no `MockServer`, no sockets, no `async`. New contract facts recorded as Findings 98–104. |
+| 12 | 2026-10-29 | P11: in-crate `#[cfg(test)] mod tests` sweep of the last cold *pure* logic, read off `--show-missing-lines` — 6 files / 28 tests: `core/query.rs` (4) for the `account_id()` override, the two `From` impls that pick the arm of the untagged `Filter`, and `Filter::operator` AND/OR/NOT trees reaching the wire through the builder (RFC 8620 §5.5); `core/query_changes.rs` (3) for the `account_id()` override, the full RFC 8620 §5.6 / RFC 8621 §2.4 request, and `upToId`/`maxChanges` independence; `core/changes.rs` (2) for the `account_id()` override and the `/created` `/updated` `/updatedProperties` references (§3.6); `mailbox/query.rs` (4) for `Filter::role`'s `Role::None` → explicit `null`, the `parentId` pass-through, the three comparators and a tree-shaped `Mailbox/query` (§2.3); `principal/query.rs` (4) for `Comparator::ptype`/`Filter::ptype`, a nine-condition sweep and a windowed `Principal/query` (RFC 9670 §4.4); `event_source/parser.rs` (11, added to the module P7 started) for `needs_bytes()`, the `id:`-present/absent split, `EmailPush` → `Internal("Unexpected PushObject variant")`, malformed JSON in both the state and calendar-alert arms, the unknown-field drop, CRLF framing, both halves of the 1 MiB `MAX_EVENT_SIZE` guard, and the swallowed `ping` under both `cfg`s. | **98.19%** lines (11262 instr., 11058 covered) — **+0.58 pp / +559 lines** over P10's 97.61%; uncovered 257 → **204** | **562 client pass** (257 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 P10 + 28 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (562), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 96.67% → **97.14%**, functions 95.47% → **96.03%**. Diff is **insertions only** (921 added, 0 deletions). **All six targets reached 100.00% lines** and `--show-missing-lines` names nothing in any of them; the P8/P9/P10 macro-attribution residual was eliminated by binding `matches!` to a single-line `let` rather than documented. New contract facts recorded as Findings 105–111. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -1066,6 +1128,44 @@ redirect, per the brief):
 `core/copy.rs` and `core/get.rs` each report **1** uncovered line that
 `--show-missing-lines` does not name — the same macro-attribution artefact
 recorded for P8 and P9, not untested logic.
+
+#### P11 per-file line-coverage delta
+
+Against the P10 end state (**97.61%** lines, 10756 instr., 10499
+covered; 96.67% regions / 95.47% functions). As in P8–P10 the
+instrumented total grows (10756 → 11262) because the in-crate
+`mod tests` blocks are themselves `src/` code; the per-file percentages
+are the honest signal, and every one of the six moved by 5.97 pp or more.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `event_source/parser.rs` | 86.98% | **100.00%** | +13.02 | 167 → 330 (+163) |
+| `mailbox/query.rs` | 89.47% | **100.00%** | +10.53 | 34 → 117 (+83) |
+| `core/query.rs` | 90.78% | **100.00%** | +9.22 | 128 → 231 (+103) |
+| `core/query_changes.rs` | 93.65% | **100.00%** | +6.35 | 59 → 132 (+73) |
+| `principal/query.rs` | 93.75% | **100.00%** | +6.25 | 45 → 138 (+93) |
+| `core/changes.rs` | 94.03% | **100.00%** | +5.97 | 63 → 107 (+44) |
+| **TOTAL** | **97.61%** | **98.19%** | **+0.58** | **10499 → 11058 (+559)** |
+
+Regions 96.67% → **97.14%** (+0.47) and functions 95.47% → **96.03%**
+(+0.56); uncovered lines 257 → **204**. All six targets closed to
+100.00%, and `--show-missing-lines` names **nothing** in any of them.
+
+**Lines deliberately not chased in P11:** none inside the six files. The
+204 lines still cold elsewhere in `src/` are the set P10 named plus the
+per-domain residuals the earlier phases already explained —
+`client.rs` 226-248 / 366-378 (the two `redirect::Policy::custom`
+closure bodies) and 431 / 478 (the `?`-propagation and non-
+`problem+json` arms of the response decoder), `client_ws.rs` 236-248
+(the `wss://` + `accept_invalid_certs` dial), `core/request.rs` 245-471
+(the per-method `Arguments` arms no client helper builds) and 534-536,
+the `SetObject::new()` `unimplemented!()` pairs at `email/set.rs`
+252-253, `email_submission/set.rs` 71-72, `mailbox/set.rs` 116-117 and
+`principal/set.rs` 142-143 (Finding #94), `core/session.rs` 499 / 521,
+`core/set.rs` 403, and the unreachable error arms in the ten
+`*/helpers.rs` files plus
+`{email_submission,principal,push_subscription}/get.rs` 21-23. Each one
+needs a live socket, a real redirect, or a panic.
 
 ## Findings log
 
@@ -1811,4 +1911,70 @@ _Discovered writing the P8 in-crate unit tests against `core/response.rs`,
     meaningful inside the same method's own response — a back-reference
     from a `get`'s list to another argument of that same `get` — and
     cannot be used to chain across two different methods.
+
+_Discovered writing the P11 in-crate unit tests against `core/query.rs`,
+`core/query_changes.rs`, `core/changes.rs`, `mailbox/query.rs`,
+`principal/query.rs` and `event_source/parser.rs`._
+
+105. **The filter combinators live on the generic
+    `core::query::Filter<T>`, not on the domain filter enums.**
+    `mailbox::query::Filter::and(..)` and `principal::query::Filter::and(..)`
+    do not compile — E0599, "no variant, associated function, or constant
+    named `and` found" — because the domain enums carry only their own
+    single-condition constructors. A caller who wants an AND/OR/NOT group
+    must name the generic type (`query::Filter::and([..])`), and the
+    element type has to be pinned with a typed local
+    (`let domain: query::Filter<Filter> = Filter::domain_name(…).into();`)
+    because an inline `.into()` inside the array is ambiguous (E0283).
+    Generalises Finding #64 to every domain's operator groups.
+106. **`FilterOperator<T>` has no public constructor and no accessors.**
+    Its `operator` and `conditions` fields are private to `core::query`,
+    so outside that module a `FilterOperator` can only be *obtained* by
+    destructuring a `Filter::FilterOperator`, never *built*: every tree
+    must go through `Filter::operator`/`and`/`or`/`not`. In-crate the
+    fields are reachable, which is why the P11 test can drive
+    `From<FilterOperator<T>> for Filter<T>` directly — an integration
+    test outside the module cannot construct the input that impl needs.
+107. **A bare `Mailbox/query` is never just `{accountId}`.** Mailbox's
+    flattened `QueryArguments` declares `sortAsTree` and `filterAsTree`
+    as plain `bool`s with no `skip_serializing_if`, so both ride along as
+    `false` on `Mailbox/query` *and* `Mailbox/queryChanges` even when
+    the caller never touches `arguments()`. Restates Finding #35 for the
+    request-builder side: an assertion that an untouched request carries
+    "nothing but the account" must still expect the two tree members.
+108. **The SSE parser's error path does not release its buffer.** On the
+    `MAX_EVENT_SIZE` guard `next()` returns `Some(Err(..))` from inside
+    the byte loop, before the `self.bytes = None; self.pos = 0` reset at
+    the bottom. `needs_bytes()` therefore stays `false`, and a second
+    `next()` or `filter_notification()` re-reports the same error from
+    the same offset. The only recovery is `push_bytes` with a fresh chunk
+    — which *replaces* the buffer (Finding #79) rather than resuming it.
+    A caller that treats a parser error as "retry the same bytes" gets an
+    endless error loop instead of a restart.
+109. **The calendar-alert SSE event name is the camelCase literal
+    `calendarAlert`, not `CalendarAlert`.** `parser.rs:190` matches
+    `b"calendarAlert"` exactly; every other value — including the
+    PascalCase `CalendarAlert` that `DataType`'s `Display`/serde name
+    uses — falls through the `_` arm to `EventType::State`, and the
+    payload is then parsed as a `PushObject`, yielding "Unexpected
+    PushObject variant" or a parse error. The three name styles in play
+    (SSE `calendarAlert`, `DataType::CalendarAlert`,
+    `PushObject::CalendarAlert`) are not interchangeable.
+110. **The 1 MiB event guard is checked *before* the byte is pushed, and
+    the value side measures field + value.** `field.len() >= MAX_EVENT_SIZE`
+    fires on the byte that would make the field `MAX + 1`, so a test needs
+    `MAX + 1` bytes to trip it; the value check is
+    `(field.len() + self.value.len()) >= MAX_EVENT_SIZE`, so a long value
+    under a 4-byte `data` field trips four bytes earlier than the same
+    value under an empty field name. `MAX_EVENT_SIZE` is private, so a
+    test must hard-code `1024 * 1024` rather than read the limit.
+111. **A bare CR is dropped in every parser state, so CRLF framing is
+    exactly equivalent to LF — even inside a field name.**
+    `b'\r' => ()` appears in the `Init`, `Field` and `Value` arms, so
+    `id\r: 7\r\n` parses as field `id`, value `7`, and the dispatching
+    blank line may be `\r\n`. Combined with the
+    `b' ' if self.value.is_empty() => ()` arm that strips one leading
+    space, the only place a space survives is inside a value that already
+    has content — a value of `" x"` keeps its space, a value of `"x"`
+    never gains one, and no CR ever reaches `id`/`data`.
 
