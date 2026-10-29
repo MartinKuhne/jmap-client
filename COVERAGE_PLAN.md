@@ -255,6 +255,14 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 - [x] Verify + commit — *this increment* (core_methods.rs only); P3 is not
       closed until `changes_query.rs` lands.
 
+### P3-followup — mock-jmap WS handshake flake (fix before P7) ⬜
+- `websocket_refuses_a_connection_that_offers_no_subprotocol` intermittently
+  reads an empty rejection body (~1 in 3 under full-suite load; 5/5 green in
+  isolation — orchestrator confirmed). Root cause: the mock writes the
+  problem+json rejection but may close the socket before the body flushes.
+  P7 depends on reliable WS handshake assertions — fix the mock to flush/await
+  the write before closing. Owner: P7 agent.
+
 ### P4 — Integration tests: mail domain  ⬜
 - [ ] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
 - [ ] tests/email.rs: get/set/query/import/parse/copy + keywords + helpers
