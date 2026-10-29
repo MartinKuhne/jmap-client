@@ -311,11 +311,70 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
       `SearchSnippetGetRequest::{email_id,email_ids,email_ids_ref,filter}`).
 - [x] Verify + commit — P4 closed by this increment (85 new tests green).
 
-### P5 — Integration tests: submission / identity / vacation  ⬜
-- [ ] tests/email_submission.rs (incl. delivery time, undo, bounce)
-- [ ] tests/identity.rs
-- [ ] tests/vacation_response.rs
-- [ ] Verify + commit
+### P5 — Integration tests: submission / identity / vacation  ✅
+- [x] tests/email_submission.rs — **27 tests**, wiremock-backed:
+      `Client::email_submission_{get,create,create_envelope,change_status,
+      destroy,query,changes}` plus the `Request::{get,set,query,
+      query_changes,changes}_email_submission` builders and
+      `TaggedMethodResponse::unwrap_{get,set,query,query_changes,changes}
+      _email_submission`.
+      * Get: full RFC 8621 §7.1 object round-trip (envelope, `sendAt`,
+        `undoStatus`, per-recipient `deliveryStatus`, `dsnBlobIds`,
+        `mdnBlobIds`), property-subset request shape, `notFound` → `None`,
+        the Finding-#48 `take_list().pop()` trap, and a missing-required-
+        member parse failure (Finding #8).
+      * Create: creation-id round-trip (`c0`), `create_envelope` putting
+        `mailFrom`/`rcptTo` on the wire, and the three RFC example failures
+        `forbiddenTo` / `invalidProperties` / `noRecipients`.
+      * Set: `change_status` cancel of a `pending` submission,
+        `cannotUnsend`, `destroy` + `notDestroyed`, and a raw
+        `set_email_submission` carrying `onSuccessUpdateEmail` /
+        `onSuccessDestroyEmail`.
+      * Query: filter + sort round-trip, one AND group with **every**
+        `FilterCondition` of §7.3, `unsupportedSort`, and the empty-filter
+        default; `queryChanges` with `AddedItem`/`removed` (§7.4).
+      * Changes: every member round-trip (§7.2) and `cannotCalculateChanges`.
+      * Enums: exhaustive `DeliveryStatus`/`Delivered`/`Displayed` and
+        `UndoStatus` (de)serialisation, `Property` Display.
+      * Chain: `EmailSubmission/query` → `Email/get` by `#ids: /ids`
+        result reference.
+      Note: the box said "delivery time, undo, bounce". There is no
+      delivery-timestamp member in the RFC (Finding #53); delivery state is
+      `deliveryStatus[recipient] = {smtpReply, delivered, displayed}` and a
+      bounce is `delivered: "no"`, so the tests assert that shape.
+- [x] tests/identity.rs — **22 tests**, wiremock-backed:
+      `Client::identity_{get,create,destroy,changes}` plus
+      `Request::{get,set,changes}_identity`.
+      * Get: RFC §6.1 record round-trip, the `*@domain` wildcard record with
+        empty signatures, `notFound` → `None`, the `pop()` trap, property
+        subset, missing-required-member parse error.
+      * Create: creation-id round-trip, `replyTo`/`bcc`/both signatures on
+        the wire, `forbiddenFrom`, `invalidProperties`.
+      * Update: html-signature patch, updated-object echo,
+        `notUpdated.invalidProperties`, and a single call that creates,
+        updates and destroys together.
+      * Destroy: success, `forbidden` when `mayDelete` is false, and
+        `ifInState` state mismatch.
+      * Changes: every member (§6.2) and `cannotCalculateChanges`.
+      * Cross-cutting: the mail-only `using` list (§1.3.4), `Property`
+        Display, and a locally implemented RFC §6 *most likely identity*
+        rule (exact address preferred over the wildcard) that documents the
+        missing crate helper (Finding #58).
+- [x] tests/vacation_response.rs — **18 tests**, wiremock-backed:
+      `Client::vacation_response_{get,enable,disable,set_dates,create,
+      destroy}` plus `Request::{get,set}_vacation_response`.
+      * Get: enabled and disabled singleton, property subset, singleton
+        missing → `None`, missing-required-member parse error.
+      * Set: full enable patch, `enable` with an unset body member
+        serialising as explicit `null`, `disable` → `isEnabled: false`,
+        `set_dates` emitting both timestamps, `set_dates(…, None, None)`
+        clearing both, `create` with a creation id, the `singleton`
+        already-exists error, `invalidDate` for a reversed range,
+        `ifInState` mismatch, `destroy` + `notDestroyed`.
+      * Chain: `VacationResponse/get` then `VacationResponse/set` in one
+        request, unwrapped per call id (Finding #49).
+      * `Property` Display.
+- [x] Verify + commit — P5 closed by this increment (67 new tests green).
 
 ### P6 — Integration tests: sieve / principal / push / blob  ⬜
 - [ ] tests/sieve.rs (get/set/query/validate + script blob flow)
@@ -354,6 +413,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 3 | 2026-10-28 | P3 (part 1): shared wiremock fixture layer `tests/common/mod.rs` + `tests/core_methods.rs` — 28 core protocol tests (session fetch, request/response round-trips, call ids, result references, createdIds, capability filtering, problem/method/parse error paths, session staleness + refresh, account/timeout/headers) | **16.67%** lines (6953 instr., 1159 covered) — **+9.90 pp / +688 lines** over the 6.77% re-measured baseline | **37 client pass** (7 lib unit + 2 crypto-provider + 28 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (7 warnings, all pre-existing in `mock-jmap`), coverage summary lists only `src/` rows. Baseline re-measured at **6.77%** with the P3 files removed (the ledger's 7.05% predates the P1/P2 branch state); deltas below are against the re-measured figure. `tests/changes_query.rs` (P3 box 2) is still open. |
 | 4 | 2026-10-28 | P3 (part 2): `tests/changes_query.rs` — 23 changes/query/queryChanges tests (Mailbox+Email+Thread changes round-trips and RFC §5.2 paging, `updatedProperties`, Mailbox/Email query filter+Comparator+collation+window, Mailbox/Email queryChanges with `AddedItem`, `cannotCalculateChanges`/`tooManyChanges`/`unsupportedSort`/`unsupportedFilter`, `canCalculateChanges=false`, and the lib.rs-doc-example + RFC 8621 §2.6/§4.10 result-reference chains) | **22.26%** lines (6953 instr., 1548 covered) — **+5.59 pp / +389 lines** over P3 part 1's 16.67% | **60 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only 7 warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `core/changes.rs` and `core/query_changes.rs` went from 0.00% to ~94%/~94%; `core/query.rs` 25.53% → 71.63%. P3 is now closed. New contract facts recorded as Findings 33–38. |
 | 5 | 2026-10-28 | P4: mail-domain wiremock integration tests — `tests/mailbox.rs` (26), `tests/email.rs` (37), `tests/thread.rs` (11), `tests/search_snippet.rs` (11). Drives every `Client::mailbox_*` / `Client::email_*` / `Client::thread_get` / `Client::search_snippet_get` helper plus the matching `Request::` builders against RFC-verbatim 8621/8620 fixtures; each test owns its `MockServer` and asserts the method name went on the wire. | **46.31%** lines (6953 instr., 3220 covered) — **+24.05 pp / +1672 lines** over P3's 22.26% | **145 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `mailbox/helpers.rs`, `thread/{get,helpers,mod}.rs` and `email/search_snippet.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 39–52. |
+| 6 | 2026-10-28 | P5: submission / identity / vacation wiremock integration tests — `tests/email_submission.rs` (27), `tests/identity.rs` (22), `tests/vacation_response.rs` (18). Drives every `Client::email_submission_*` / `Client::identity_*` / `Client::vacation_response_*` helper plus the matching `Request::` builders and `unwrap_*` accessors against RFC-verbatim 8621 §6/§7/§8 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **59.14%** lines (6953 instr., 4112 covered) — **+12.83 pp / +892 lines** over P4's 46.31% | **212 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green (212), `cargo test -p mock-jmap` green (80), `cargo clippy -p jmap-client --all-targets` clean for `tests/` (all 7 warnings are the pre-existing `mock-jmap` lib ones — none in `src/` or `tests/`), coverage summary lists only `src/` rows. All 13 target modules went from 0.00%; `email_submission/query.rs` and `vacation_response/get.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 53–65. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -451,6 +511,49 @@ Still cold after P4 (P5/P6/P7 targets): `core/mod.rs`,
 module. `email/query.rs` (21.38%) and `core/response.rs` (20.75%) remain
 low because most of their surface is per-filter / per-method-variant code that
 P8's unit sweep is a better fit for than per-request integration tests.
+
+#### P5 per-file line-coverage delta
+
+Against the state after P4 (`46.31%` / 3220 lines covered), re-measured with
+the three P5 files removed from `tests/`. Instrumented total unchanged at
+6953 lines.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `email_submission/query.rs` | 0.00% | **100.00%** | +100.00 | 0 → 43 (+43) |
+| `vacation_response/get.rs` | 0.00% | **100.00%** | +100.00 | 0 → 23 (+23) |
+| `vacation_response/helpers.rs` | 0.00% | **96.69%** | +96.69 | 0 → 117 (+117) |
+| `identity/helpers.rs` | 0.00% | **95.56%** | +95.56 | 0 → 86 (+86) |
+| `email_submission/get.rs` | 0.00% | **95.31%** | +95.31 | 0 → 61 (+61) |
+| `email_submission/helpers.rs` | 0.00% | **92.59%** | +92.59 | 0 → 175 (+175) |
+| `identity/set.rs` | 0.00% | **91.23%** | +91.23 | 0 → 52 (+52) |
+| `vacation_response/set.rs` | 0.00% | **89.80%** | +89.80 | 0 → 44 (+44) |
+| `identity/get.rs` | 0.00% | **88.89%** | +88.89 | 0 → 24 (+24) |
+| `email_submission/mod.rs` | 0.00% | **84.21%** | +84.21 | 0 → 16 (+16) |
+| `identity/mod.rs` | 0.00% | **82.35%** | +82.35 | 0 → 14 (+14) |
+| `vacation_response/mod.rs` | 0.00% | **81.25%** | +81.25 | 0 → 13 (+13) |
+| `email_submission/set.rs` | 0.00% | **78.29%** | +78.29 | 0 → 101 (+101) |
+| `core/request.rs` | 62.99% | **76.28%** | +13.29 | 308 → 373 (+65) |
+| `core/set.rs` | 56.93% | **65.17%** | +8.24 | 152 → 174 (+22) |
+| `core/response.rs` | 20.75% | **27.27%** | +6.52 | 89 → 117 (+28) |
+| `email/set.rs` | 74.35% | **76.37%** | +2.02 | 258 → 265 (+7) |
+| `core/error.rs` | 46.25% | **47.50%** | +1.25 | 37 → 38 (+1) |
+| **TOTAL** | **46.31%** | **59.14%** | **+12.83** | **3220 → 4112 (+892)** |
+
+Of the +892 lines, 769 are the thirteen P5 target modules and 123 are shared
+core plumbing (`core/request.rs` method-call/params glue, `core/set.rs`
+`SetRequest` create/update/destroy + `ifInState`, `core/response.rs`
+`unwrap_*` accessors, `email/set.rs` patch keys, `core/error.rs`
+`SetError`/`MethodError` variants).
+
+Regions moved 44.75% → 56.93% and functions 44.25% → 57.85% over the same
+increment.
+
+Still cold after P5 (P6/P7/P8 targets): `core/mod.rs`,
+`event_source/{mod,stream}.rs`, `blob/{copy,download,helpers}.rs`,
+`client_ws.rs`, and every
+`principal`/`push_subscription`/`sieve` module. `email/query.rs` (21.38%)
+and `lib.rs` (36.99%) are unchanged by this increment.
 
 ## Findings log
 
@@ -738,3 +841,104 @@ _Discovered writing the P3 changes/query/queryChanges wiremock tests._
     `Error::Parse`. Canned fixtures must therefore be exactly the RFC shape —
     a stray `"partId"` on an `Email` record, or a typo'd property name,
     takes down the entire `Email/get`.
+
+_Discovered writing the P5 submission/identity/vacation wiremock tests._
+
+53. **`EmailSubmission` has no delivery-timestamp member.** RFC 8621 §7
+    spells the object exactly `{id, identityId, emailId, threadId, envelope,
+    sendAt, undoStatus, deliveryStatus, dsnBlobIds, mdnBlobIds}`: there is
+    no `deliveredAt`, `undeliveredEvents`, `deliveryAttempts` or
+    `bounceEmailId`, and no per-recipient timestamp anywhere. Delivery
+    state is `deliveryStatus: { "<recipient>": {smtpReply, delivered,
+    displayed} }` with `Delivered ∈ {queued, yes, no, unknown}` and
+    `Displayed ∈ {unknown, yes}`; a *bounce* is a `delivered: "no"` entry
+    carrying the SMTP reply string, not a linked Email. The P5 box's
+    "delivery time" is `sendAt` (when the server will/did send) plus that
+    status map.
+54. **`EmailSubmission/set` answers one call with TWO method responses and
+    `Client::email_submission_create` reads the wrong one.** Same class as
+    Finding #40. RFC 8621 §7.5.1: "there are two responses due to the
+    implicit `Email/set` call, but both have the same method call id", the
+    submission result first. `send_single` pops the **last** (Finding #49),
+    so the helper ends up holding the implicit `Email/set` body, which has
+    no `created` member, and returns
+    `Error::Internal("Id c0 not found.")` against a spec-following server.
+    Pinned by
+    `email_submission_create_with_the_rfc_implicit_email_set_response_lands_on_the_wrong_body`;
+    the correct read is `Request::send()` plus
+    `method_response_by_pos(0).unwrap_set_email_submission()`, after which
+    the implicit `Email/set` is still readable.
+55. **No `Client::email_submission_update` and no
+    `Client::email_submission_query_changes`.** A submission is mutable only
+    through `Client::email_submission_change_status(id, UndoStatus)` (emits
+    `{"<id>": {"undoStatus": …}}`); arbitrary patches and
+    `EmailSubmission/queryChanges` exist at the `Request::` level only
+    (`set_email_submission`, `query_email_submission_changes`).
+56. **`Client::email_submission_get` and `Client::identity_get` are
+    `take_list().pop()`.** The Finding-#48 trap repeated in both domains:
+    they return the *last* record the server sent, not the one whose id was
+    passed, so they are safe for single-id fetches only. Multi-id reads must
+    go through `Request::get_email_submission().ids([..])` or
+    `Request::get_identity().ids([..])` and index `response.list()`.
+    Pinned by `*_pops_the_last_record_when_the_server_returns_several` in
+    both test files.
+57. **`Identity`, `EmailSubmission` and `VacationResponse` do not implement
+    `PartialEq`.** `assert_eq!(client.identity_update(id, patch).await
+    .unwrap(), None)` fails to compile (trait bound unsatisfied); assert with
+    `.is_none()` instead. Only the nested enums derive equality
+    (`UndoStatus`, `DeliveryStatus`, `Delivered`, `Displayed`, `Property`).
+58. **There is no "most likely identity" helper in the crate.** RFC 8621 §6
+    describes a client-side selection rule: prefer the Identity whose `email`
+    matches the sender exactly, else the `*@domain` wildcard identity. The
+    crate exposes nothing equivalent, so callers must reimplement it.
+    `tests/identity.rs` carries a local `most_likely_identity()` plus
+    `identity_selection_prefers_an_exact_address_over_a_wildcard_identity`
+    to pin the RFC semantics and document the gap.
+59. **`Identity` has no `sortOrder`, `draftId` or `queueId`.** The object is
+    `{id, name, email, replyTo, bcc, textSignature, htmlSignature,
+    mayDelete}` (RFC 8621 §6). `mayDelete` is a server-computed, read-only
+    flag: a test that wants "cannot delete" sets `mayDelete: false` in the
+    fixture and drives the `forbidden` SetError path; it cannot set the flag
+    itself.
+60. **Identity rides on the Mail capability; the client adds no
+    identity-specific URI.** `Request::{get,set,changes}_identity` add only
+    `urn:ietf:params:jmap:mail` (RFC 8621 §1.3.4 registers Identity under
+    Mail). A test must not expect an identity-specific entry in `using`, and
+    a request that `using`s only Core while calling `Identity/get` is a shape
+    the client never produces.
+61. **`VacationResponse` is a singleton with a hard-coded id.** RFC 8621 §8:
+    at most one object per account and "It MUST have the id `singleton`".
+    The client hard-codes it: `vacation_response_get` requests
+    `ids: ["singleton"]` and maps the result through `take_list().pop()`,
+    which is why its return type is `Option<VacationResponse>`: an empty
+    `list` is the RFC-legal "no vacation response configured" answer, not an
+    error. `vacation_response_destroy()` takes no id for the same reason.
+62. **`Request::set_vacation_response` builds its params from
+    `Method::GetVacationResponse`.** `src/vacation_response/helpers.rs:152`
+    passes `self.params(Method::GetVacationResponse)` into
+    `Arguments::vacation_response_set` while registering the call as
+    `Method::SetVacationResponse`. Harmless today: `SetRequest::new(params)`
+    never inspects the method, so the name on the wire is correct. But any
+    future change that keys off the params' method would silently mis-route
+    the set call. Recorded, not fixed (content-protection rule).
+63. **`vacation_response_enable` with an unset body member serialises it as
+    explicit `null`.** `enable("subject", None::<String>, Some(html))` sends
+    `{"isEnabled": true, "subject": …, "textBody": null, "htmlBody": …}`.
+    Same mechanism as Finding #39: the `skip_serializing_if` guards only
+    suppress the sentinel `Some(…)` seeds, so an assigned `None` rides along.
+    RFC 8620 §5.3 defines `null` in a patch as "clear this member", so the
+    request stays conformant, but the key is present, and a server that treats
+    `null` as "ignore" would leave the old body in place.
+64. **`Filter::and(..)` cannot infer its element type from `.into()` calls.**
+    Building the conditions inline yields E0283 (ambiguous trait bounds); the
+    collection must be annotated, e.g.
+    `let conditions: Vec<Filter<SubmissionFilter>> = vec![…];`. Same for the
+    other domains' operator groups.
+65. **`Email<Set>` dotted-patch removal is boolean `false`, not `null`.**
+    The per-key setters are `mailbox_id(&str, bool)` and `keyword(&str, bool)`
+    (there is no `mailbox_ids_set` / `keywords_set`), and they insert
+    `mailboxIds/<id>: false` / `keywords/<k>: false`. That is exactly what
+    RFC 8621 §4.3 defines for those dotted keys, so it is correct, but it is
+    *not* the generic RFC 8620 §5.3 "`null` clears the property" form, which
+    these setters cannot produce. `mailbox_ids([])` sends an empty map
+    instead of a removal patch.
