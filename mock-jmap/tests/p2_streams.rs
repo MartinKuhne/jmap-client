@@ -255,7 +255,10 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// to the push bus, so a push after this call cannot be missed.
 async fn open_stream(server: &MockJmapServer, query: &str) -> SseReader {
     let mut headers = vec![("Authorization", AUTH.to_string())];
-    if let Some(id) = LAST_EVENT_ID.with(|value| value.lock().unwrap().clone()) {
+    // Consume the value rather than cloning it: a `Last-Event-ID` must apply to
+    // exactly one connection. Leaving it set would let a resume token leak into
+    // whatever test the harness happens to run next on this thread.
+    if let Some(id) = LAST_EVENT_ID.with(|value| value.lock().unwrap().take()) {
         headers.push(("Last-Event-ID", id));
     }
     let mut reader = SseReader::open(server.port(), &format!("/eventSource{query}"), &headers).await;

@@ -178,7 +178,19 @@ pub fn dispatch_request(shared: &mut Shared, root: Value) -> Result<Value, Reque
     };
 
     let advertised = crate::session::advertised_capabilities();
-    for capability in using.iter().filter_map(Value::as_str) {
+    for entry in using.iter() {
+        // RFC 8620 §3.2 types `using` as String[Id]. A non-string entry makes
+        // the request malformed, which is a `notRequest` problem (§3.5) — not
+        // something to skip. Skipping would let a client that serialises a
+        // capability wrongly pass here and fail against a real server.
+        let Some(capability) = entry.as_str() else {
+            return Err(RequestProblem::new(
+                400,
+                NOT_REQUEST,
+                "\"using\" must be an array of strings",
+                None,
+            ));
+        };
         if !advertised.contains(&capability) {
             return Err(RequestProblem::new(
                 400,

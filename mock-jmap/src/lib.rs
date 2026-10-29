@@ -528,17 +528,35 @@ impl Drop for MockJmapServer {
 }
 
 async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<Shared>>, shutdown: Arc<Notify>) {
+    // A single failed `accept()` must not silently retire the listener: under
+    // parallel test load a transient error (EMFILE/ENFILE/ECONNABORTED) would
+    // otherwise leave every later connection hanging until the test's own
+    // timeout, which surfaces as an unrelated flake. Retry, but bound the
+    // retries so a genuinely dead listener still terminates the loop.
+    const MAX_CONSECUTIVE_FAILURES: u32 = 32;
+    let mut failures: u32 = 0;
     loop {
         tokio::select! {
             _ = shutdown.notified() => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _peer)) => {
+                    failures = 0;
                     let shared = Arc::clone(&shared);
                     tokio::spawn(async move {
                         let _ = serve_connection(stream, shared).await;
                     });
                 }
-                Err(_) => break,
+                Err(err) => {
+                    failures += 1;
+                    if failures >= MAX_CONSECUTIVE_FAILURES {
+                        eprintln!(
+                            "mock-jmap: accept() failed {failures} times in a row ({err}); \
+                             stopping the accept loop"
+                        );
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
             },
         }
     }
