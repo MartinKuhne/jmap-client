@@ -72,3 +72,91 @@ impl SetObject for SieveScript<Get> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the SieveScript patch builders and for the
+    //! `<Get>` arm of `SetObject`
+    //! (draft-ietf-jmap-sieve-12 §2.2).
+
+    use super::*;
+    use serde_json::json;
+
+    /// draft-ietf-jmap-sieve-12 §2.2 — a create patch carries the
+    /// script `name` and the `blobId` of the uploaded text, and the
+    /// creation id the generic `Set` machinery assigned is rendered with
+    /// the `c` prefix.
+    #[test]
+    fn create_patch_carries_name_and_blob_id() {
+        let mut script = <SieveScript<Set> as SetObject>::new(Some(2));
+        script.name("filter").blob_id("BlobId1");
+
+        assert_eq!(script.create_id().as_deref(), Some("c2"));
+        assert_eq!(
+            serde_json::to_value(&script).unwrap(),
+            json!({ "name": "filter", "blobId": "BlobId1" }),
+            "`isActive` is not part of a create patch"
+        );
+    }
+
+    /// draft-ietf-jmap-sieve-12 §2.2 — `onSuccessActivateScript` is a
+    /// *result reference* (`#c0`) when it points at a script being
+    /// created in the same request and a plain id when it points at one
+    /// that already exists. The two setters differ only in that prefix.
+    #[test]
+    fn set_arguments_reference_or_name_the_script_to_activate() {
+        let mut args = SetArguments::default();
+        args.on_success_activate_script("c0");
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            json!({ "onSuccessActivateScript": "#c0" })
+        );
+
+        let mut args = SetArguments::default();
+        args.on_success_activate_script_id("script-42");
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            json!({ "onSuccessActivateScript": "script-42" }),
+            "the `_id` form adds no `#`"
+        );
+
+        let mut args = SetArguments::default();
+        args.on_success_deactivate_script(true);
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            json!({ "onSuccessDeactivateScript": true })
+        );
+
+        assert_eq!(
+            serde_json::to_value(SetArguments::default()).unwrap(),
+            json!({}),
+            "an untouched argument block writes nothing"
+        );
+    }
+
+    /// A fetched script is not a create: it has no creation id, whatever
+    /// the record itself says.
+    #[test]
+    fn a_fetched_script_has_no_creation_id() {
+        let script: SieveScript<Get> = serde_json::from_value(json!({
+            "id": "s1",
+            "name": "filter",
+            "isActive": true,
+            "blobId": "BlobId1"
+        }))
+        .unwrap();
+
+        assert_eq!(script.create_id(), None);
+    }
+
+    /// The `<Get>` arm of `SetObject::new` is a deliberate
+    /// `unimplemented!()`: nothing in the generic set machinery ever asks
+    /// a fetched record to construct itself, so the only way to reach the
+    /// arm is to ask for it directly — and it panics. Narrowing
+    /// Finding #94: the arm is reachable, under `#[should_panic]`.
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn a_fetched_script_refuses_to_construct_itself() {
+        let _ = <SieveScript<Get> as SetObject>::new(None);
+    }
+}

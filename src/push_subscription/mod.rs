@@ -121,3 +121,51 @@ impl ChangesObject for PushSubscription<Set> {
 impl ChangesObject for PushSubscription<Get> {
     type ChangesResponse = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure wire-name table of the push
+    //! `Property` enum and for the `Object` account-scoping flag
+    //! (RFC 8620 §7.2.1/§7.2.2).
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8620 §7.2.2 — `Display` and `Serialize` must agree on the
+    /// wire name of every variant, and reading that name back must land
+    /// on the same variant.
+    #[test]
+    fn property_display_and_serde_round_trip_every_variant() {
+        let cases: &[(Property, &str)] = &[
+            (Property::Id, "id"),
+            (Property::DeviceClientId, "deviceClientId"),
+            (Property::Url, "url"),
+            (Property::Keys, "keys"),
+            (Property::VerificationCode, "verificationCode"),
+            (Property::Expires, "expires"),
+            (Property::Types, "types"),
+        ];
+
+        assert_eq!(cases.len(), 7, "seven push-subscription properties");
+        for (property, wire) in cases {
+            assert_eq!(property.to_string(), *wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(property).unwrap(), json!(*wire));
+            assert_eq!(
+                serde_json::from_value::<Property>(json!(*wire)).unwrap(),
+                *property,
+                "{wire} must round-trip back to the variant it came from"
+            );
+        }
+    }
+
+    /// RFC 8620 §7.2.1 — a push subscription is *not* tied to an
+    /// account: "it does not take or return an `accountId` argument".
+    /// Both flavours therefore report `false`, which is what keeps the
+    /// generic `GetRequest`/`SetRequest` builders from emitting an
+    /// `accountId` this method has no use for.
+    #[test]
+    fn neither_push_flavour_requires_an_account_id() {
+        assert!(!<PushSubscription<Set> as Object>::requires_account_id());
+        assert!(!<PushSubscription<Get> as Object>::requires_account_id());
+    }
+}

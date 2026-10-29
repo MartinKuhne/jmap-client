@@ -534,6 +534,8 @@ impl From<(String, String)> for Credentials {
 #[cfg(test)]
 mod tests {
     use crate::core::response::{Response, TaggedMethodResponse};
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_deserialize() {
@@ -575,5 +577,192 @@ mod tests {
             }, "t2" ]]}"#,
         )
         .unwrap();
+    }
+
+    /// A session as `GET /.well-known/jmap` answers it (RFC 8620 §3.1),
+    /// enough to build a `Client` with no network access at all.
+    fn test_session() -> Session {
+        serde_json::from_value(serde_json::json!({
+            "capabilities": {
+                "urn:ietf:params:jmap:core": {
+                    "maxSizeUpload": 52_428_800,
+                    "maxConcurrentUpload": 2,
+                    "maxSizeRequest": 10_485_760,
+                    "maxConcurrentRequests": 2,
+                    "maxCallsInRequest": 16,
+                    "maxObjectsInGet": 512,
+                    "maxObjectsInSet": 512,
+                    "collationAlgorithms": ["i;ascii-numeric", "i;unicode-casemap"]
+                },
+                "urn:ietf:params:jmap:mail": {
+                    "maxMailboxesPerEmail": null,
+                    "maxMailboxDepth": 10,
+                    "maxSizeMailboxName": 46,
+                    "maxSizeAttachmentsPerEmail": 26_214_400,
+                    "emailQuerySortOptions": ["receivedAt", "subject", "size"],
+                    "mayCreateTopLevelMailbox": true
+                }
+            },
+            "accounts": {
+                "u33084183": {
+                    "name": "test@example.org",
+                    "isPersonal": true,
+                    "isReadOnly": false,
+                    "accountCapabilities": {}
+                }
+            },
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "u33084183" },
+            "username": "test@example.org",
+            "apiUrl": "https://example.com/jmap/session",
+            "downloadUrl":
+                "https://example.com/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
+            "uploadUrl": "https://example.com/jmap/upload/{accountId}",
+            "eventSourceUrl":
+                "https://example.com/jmap/eventSource?types={types}&closeafter={closeafter}&ping={ping}",
+            "state": "75128aab4b1b"
+        }))
+        .expect("the session fixture must deserialise")
+    }
+
+    /// `ClientBuilder::default()` is the same fresh builder `Client::new()`
+    /// hands back: no credentials, nothing trusted, no `Forwarded` header,
+    /// certificates validated, and the ten-second default timeout.
+    #[test]
+    fn builder_defaults_are_the_safe_ones() {
+        let builder = ClientBuilder::default();
+
+        assert!(builder.credentials.is_none());
+        assert!(builder.trusted_hosts.is_empty());
+        assert!(builder.forwarded_for.is_none());
+        assert!(
+            !builder.accept_invalid_certs,
+            "certificate validation is on until the caller turns it off"
+        );
+        assert_eq!(builder.timeout, Duration::from_millis(DEFAULT_TIMEOUT_MS));
+        assert_eq!(builder.timeout, Duration::from_secs(10));
+    }
+
+    /// `accept_invalid_certs` is a plain setter: both values round-trip
+    /// through the builder, and the last call wins.
+    #[test]
+    fn accept_invalid_certs_sets_the_flag() {
+        assert!(Client::new().accept_invalid_certs(true).accept_invalid_certs);
+        assert!(!Client::new().accept_invalid_certs(false).accept_invalid_certs);
+        assert!(
+            !Client::new()
+                .accept_invalid_certs(true)
+                .accept_invalid_certs(false)
+                .accept_invalid_certs,
+            "the setter overwrites rather than latching"
+        );
+    }
+
+    /// `follow_redirects` collects whatever the caller passes — borrowed
+    /// or owned — into the trusted-host set the redirect policy reads.
+    #[test]
+    fn follow_redirects_collects_the_trusted_hosts() {
+        let builder = Client::new().follow_redirects(["mail.example.org", "api.example.org"]);
+        assert_eq!(builder.trusted_hosts.len(), 2);
+        assert!(builder.trusted_hosts.contains("mail.example.org"));
+        assert!(builder.trusted_hosts.contains("api.example.org"));
+
+        let builder = Client::new().follow_redirects(vec!["owned.example.org".to_string()]);
+        assert_eq!(builder.trusted_hosts.len(), 1);
+        assert!(builder.trusted_hosts.contains("owned.example.org"));
+
+        let builder = Client::new()
+            .follow_redirects(["a.example.org"])
+            .follow_redirects(Vec::<String>::new());
+        assert!(
+            builder.trusted_hosts.is_empty(),
+            "a second call replaces the set instead of extending it"
+        );
+    }
+
+    /// RFC 7239 §6.1 — an IPv6 `for=` value has to be quoted, because an
+    /// unquoted address contains the `:` the header grammar uses as its
+    /// own separator; an IPv4 address is written bare.
+    #[test]
+    fn forwarded_for_quotes_ipv6_but_not_ipv4() {
+        let builder = Client::new().forwarded_for(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)));
+        assert_eq!(builder.forwarded_for.as_deref(), Some("for=192.0.2.1"));
+
+        let builder = Client::new().forwarded_for(IpAddr::V6("2001:db8::1".parse().unwrap()));
+        assert_eq!(builder.forwarded_for.as_deref(), Some("for=\"2001:db8::1\""));
+
+        let builder = Client::new().forwarded_for(IpAddr::V6(Ipv6Addr::LOCALHOST));
+        assert_eq!(builder.forwarded_for.as_deref(), Some("for=\"::1\""));
+    }
+
+    /// `Client::set_follow_redirects` replaces the whole trusted-host set
+    /// on a live client, which is how a caller tightens or widens the
+    /// policy after connecting.
+    #[test]
+    fn set_follow_redirects_replaces_the_trusted_host_set() {
+        let mut client = Client::from_session_for_tests(test_session());
+        assert!(client.trusted_hosts.is_empty());
+
+        client.set_follow_redirects(["mail.example.org", "api.example.org"]);
+        assert_eq!(client.trusted_hosts.len(), 2);
+        assert!(client.trusted_hosts.contains("mail.example.org"));
+
+        client.set_follow_redirects(vec!["only.example.org".to_string()]);
+        assert_eq!(client.trusted_hosts.len(), 1);
+        assert!(
+            !client.trusted_hosts.contains("mail.example.org"),
+            "the previous set is replaced, not merged"
+        );
+
+        client.set_follow_redirects(Vec::<String>::new());
+        assert!(client.trusted_hosts.is_empty());
+    }
+
+    /// The four `From` impls split into two families: one string is a
+    /// bearer token, a two-element tuple is a Basic username/password pair
+    /// encoded with the standard base64 alphabet over `user:pass`.
+    #[test]
+    fn credentials_from_impls_pick_bearer_or_basic() {
+        assert_eq!(
+            Credentials::from("some-api-token"),
+            Credentials::bearer("some-api-token")
+        );
+        assert_eq!(
+            Credentials::from("some-api-token".to_string()),
+            Credentials::Bearer("some-api-token".to_string())
+        );
+
+        assert_eq!(
+            Credentials::from(("user@example.com", "password")),
+            Credentials::Basic("dXNlckBleGFtcGxlLmNvbTpwYXNzd29yZA==".to_string())
+        );
+        assert_eq!(
+            Credentials::from(("user@example.com".to_string(), "password".to_string())),
+            Credentials::basic("user@example.com", "password")
+        );
+        assert_eq!(
+            Credentials::from(("user@example.com".to_string(), "password".to_string())),
+            Credentials::from(("user@example.com", "password")),
+            "the owned-tuple form agrees with the borrowed one byte for byte"
+        );
+    }
+
+    /// `Credentials::basic` puts the `:` between user and password *inside*
+    /// the base64, so the separator never appears in the clear; a token
+    /// passed to `bearer` is carried verbatim.
+    #[test]
+    fn basic_encodes_the_separator_and_bearer_does_not_touch_the_token() {
+        assert_eq!(
+            Credentials::basic("a", "b"),
+            Credentials::Basic("YTpi".to_string())
+        );
+        assert_eq!(
+            Credentials::bearer("a:b"),
+            Credentials::Bearer("a:b".to_string())
+        );
+        assert_ne!(
+            Credentials::basic("ab", ""),
+            Credentials::basic("a", "b"),
+            "the separator position is part of the encoding"
+        );
     }
 }

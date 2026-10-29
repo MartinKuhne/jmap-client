@@ -625,6 +625,59 @@ Closing these needs a transport-level seam, not more unit tests.
 
 All tests are pure: no `MockServer`, no sockets, no `async`.
 
+### P10 — Final in-crate unit sweep of the remaining cold pure logic ✅
+
+P9 left 379 uncovered lines in `src/`. P10 took the ones that are *pure* —
+`Display`/serde tables, fluent builders, `From` impls and the TLS cert
+verifier — read off `--show-missing-lines` rather than the summary column,
+so every target below is a line the report actually named as cold.
+
+- [x] **Group A — `Display for Property` + account scoping in the domain
+      `mod.rs` files.** The cold lines in all five files were the
+      `requires_account_id()` arm of the `<Get>` impl, never the `Display`
+      arms (P5/P6 already drive those). Each file now asserts every
+      `Property` variant's `Display`/`Serialize`/`Deserialize` triple
+      *and* that the `<Set>` and `<Get>` flavours agree on account
+      scoping: `email_submission/mod.rs` (10 properties, RFC 8621 §7.1),
+      `identity/mod.rs` (8, §6.1), `push_subscription/mod.rs` (7,
+      RFC 8620 §7.2.2 — the one domain where the flag is `false`),
+      `sieve/mod.rs` (4, draft-ietf-jmap-sieve-12 §2.1),
+      `vacation_response/mod.rs` (7, RFC 8621 §8.1).
+      **All five at 100.00% lines.**
+- [x] **Group B — request/response builders.** `core/copy.rs` (the
+      `CopyRequest` fluent builder through the full RFC 8621 §4.7 shape,
+      plus `take_created`'s drain semantics), `core/get.rs` (the account
+      gate on both sides, the literal-vs-`#reference` mutual exclusion,
+      `result_reference`'s `/list/*/<property>` path, and the flattened
+      per-type arguments), `sieve/set.rs` (the create patch, the
+      `#`-prefixed vs plain `onSuccessActivateScript` forms, and the
+      `<Get>` arm of `SetObject`), `identity/get.rs` (`take_id`'s
+      drain-to-empty-string semantics).
+- [x] **Group C — client knobs, `Credentials`, the WS cert verifier.**
+      `client.rs`: `ClientBuilder::default`, `accept_invalid_certs`,
+      `follow_redirects` (borrowed and owned items), `forwarded_for`
+      (both the V4 `for=<addr>` and the quoted V6 `for="<addr>"` form),
+      `Client::set_follow_redirects`, and all four `Credentials` `From`
+      impls with the exact base64 pinned. `client_ws.rs`: the
+      `DummyVerifier`'s three verification hooks and its full
+      thirteen-entry `SignatureScheme` list, asserted in-crate with no
+      TLS server.
+- [x] Verify + commit — **97.61%** lines, 534 client tests green
+      (229 lib + 305 integration), 81 `mock-jmap` tests green,
+      `cargo clippy -p jmap-client --all-targets` emits **zero** warnings
+      in `src/`, and `git diff --numstat HEAD -- src` is
+      **958 insertions / 0 deletions** across the eleven files.
+
+**Lines deliberately not chased** (all need a live socket, per the brief):
+`client.rs` 226-248 and 366-378 (the two `redirect::Policy::custom`
+closure bodies — they only run when a real HTTP redirect arrives),
+`client.rs` 431 and 478 (the `?`-propagation and non-`problem+json` arms
+of `refresh_session`/`handle_error`), and `client_ws.rs` 236-248 (the
+`wss://` + `accept_invalid_certs` branch of `connect_ws`, which needs a
+TLS WebSocket endpoint). Those, plus the residual macro-attribution
+artefacts in `core/{copy,get}.rs`, are the whole remaining gap in the
+files this phase touched.
+
 ## Progress log
 
 | # | Date | Action | Line cov (src) | Tests | Notes |
@@ -639,6 +692,7 @@ All tests are pure: no `MockServer`, no sockets, no `async`.
 | 7 | 2026-10-29 | P6: sieve / principal / push_subscription / blob wiremock integration tests — `tests/principal.rs` (25), `tests/sieve.rs` (22), `tests/push_subscription.rs` (15), `tests/blob.rs` (12). Drives every `Client::sieve_script_*` / `Client::principal_*` / `Client::push_subscription_*` helper plus `Client::{upload,download,blob_copy}`, the matching `Request::` builders and `unwrap_*` accessors, against RFC 8620 §6.1–§6.3/§7.2, draft-ietf-jmap-sieve-12 §2 and RFC 9670 §4 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **75.64%** lines (6953 instr., 5259 covered) — **+16.50 pp / +1147 lines** over P5's 59.14% | **286 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 new) · mock-jmap 41 P2 + 35 P1 + 4 doctests pass, 1 known flake | Verified: `cargo test -p jmap-client` green (286), `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` lists only `src/` rows, `cargo test -p mock-jmap` green apart from the pre-existing WS-handshake flake of the P3-followup box (Finding #77). 18 of the 20 target modules went from 0.00%; `blob/copy.rs` and `sieve/validate.rs` reached 100%. No `src/` file was modified. Regions 56.93% → 73.14%, functions 57.85% → 73.97%. New contract facts recorded as Findings 66–77. The flake reproduces at the same rate with and without the P6 files (4/9 vs 2/5 full-suite runs), confirming it is independent of this increment. |
 | 8 | 2026-10-29 | P7: push-stream integration tests — `tests/websocket.rs` (15) + `tests/event_source.rs` (11), plus the P3-followup fix of the mock's WS-handshake write. Drives `Client::{connect_ws,send_ws,enable_push_ws,disable_push_ws,ws_ping,event_source}` and the RFC 8887 `WebSocketMessage` / RFC 8620 §7.3 `PushNotification`+`Changes` surfaces against the mock's own WebSocket and SSE legs: requestId correlation, `dataTypes`/`types=` filtering, `closeafter=state`, `ping` keepalive, `Last-Event-ID`/`pushState` resume, `EmailPush` delivery over WS only, `RequestError`→`ProblemDetails` vs a method error, and the not-connected error set. | **80.25%** lines (6953 instr., 5580 covered) — **+4.61 pp / +321 lines** over P6's 75.64% | **312 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 new) · mock-jmap 41 P2 + 35 P1 + 1 lib + 4 doctests pass, **0 flakes** | Verified: `cargo test -p jmap-client` green ×3 (312), `cargo test -p mock-jmap` green ×5 on top of the 8 post-fix runs (13 total, 0 flakes), `cargo clippy -p jmap-client --all-targets` clean for the two new files, coverage summary lists only `src/` rows. `event_source/stream.rs` reached **100.00%**, `event_source/mod.rs` 16.67% → **97.22%**, `client_ws.rs` 0.00% → **69.27%**, `event_source/parser.rs` 71.35% → **86.98%**. Regions 73.14% → 76.80%, functions 73.97% → 76.86%. No `src/` file was modified; `mock-jmap/` was (allowed: the flake fix + keepalive/`query` observability hooks). The P3-followup box is closed — see Findings #78/#79. New contract facts recorded as Findings 78–84. |
 | 10 | 2026-10-29 | P9: in-crate `#[cfg(test)] mod tests` sweep of the remaining cold *pure* logic — 12 files / 115 tests: `core/set.rs` (19), `core/session.rs` (13), `email/mod.rs` (15), `email/set.rs` (14), `email/get.rs` (11), `principal/set.rs` (9), `mailbox/set.rs` (9), `email_submission/set.rs` (7), `mailbox/mod.rs` (7), `email/parse.rs` (6), `sieve/get.rs` (3), `sieve/query.rs` (2). Drives the generic `SetRequest` create/update/destroy bookkeeping and the whole `SetErrorType` table, the `Email`/`Mailbox`/`Principal`/`EmailSubmission` patch builders and their dotted-path forms, the `take_*` draining accessors, and the three custom serde property visitors — against RFC-verbatim fixtures. Baseline re-measured by stashing the increment and re-running the same `llvm-cov` command. | **96.30%** lines (10254 instr., 9875 covered) — **+6.11 pp / +2403 lines** over P8's 90.19% | **500 client pass** (195 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (500), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 88.84% → **95.64%**, functions 86.57% → **93.74%**. Diff is **insertions only** (3195 added, 0 deleted). Six of the twelve targets reached **100.00%**; the other six are ≥ 99.00%. New contract facts recorded as Findings 90–97. |
+| 11 | 2026-10-29 | P10: in-crate `#[cfg(test)] mod tests` sweep of what P9 left cold, read off `--show-missing-lines` rather than the summary column — 11 files / 34 tests: the five domain `mod.rs` files (`email_submission` 8, `identity` 7, `push_subscription` 6, `sieve` 5, `vacation_response` 6) for the `<Get>` `requires_account_id()` arm plus the full `Display`/`Serialize`/`Deserialize` triple per property; `core/copy.rs` (6) and `core/get.rs` (7) for the fluent request builders and the `take_created` / account-gate / `result_reference` semantics; `sieve/set.rs` (5) for the create patch and the `#`-prefixed vs plain `onSuccessActivateScript` forms; `identity/get.rs` (3) for `take_id`'s drain; `client.rs` (11) for `ClientBuilder::{default,accept_invalid_certs,follow_redirects,forwarded_for}`, `Client::set_follow_redirects` and all four `Credentials` `From` impls with the base64 pinned; `client_ws.rs` (4) for `DummyVerifier`'s three hooks and its thirteen-entry `SignatureScheme` list, built offline via `Codec::read`. | **97.61%** lines (10756 instr., 10499 covered) — **+1.31 pp / +624 lines** over P9's 96.30%; uncovered 379 → **257** | **534 client pass** (229 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (534), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 95.64% → **96.67%**, functions 93.74% → **95.47%**. Diff is **insertions only** (958 added, 0 deleted). Seven of the eleven targets reached **100.00%**. All tests are pure: no `MockServer`, no sockets, no `async`. New contract facts recorded as Findings 98–104. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -964,6 +1018,53 @@ driven by `the_default_set_id_is_a_noop`, and the three `Visitor::expecting`
 bodies in `email/mod.rs` plus both `requires_account_id` arms in
 `email/mod.rs` and `mailbox/mod.rs`, which needed a *type*-mismatched input
 rather than an unknown string (Finding #95).
+
+#### P10 per-file line-coverage delta
+
+Against the P9 end state (**96.30%** lines, 10254 instr., 9875 covered;
+95.64% regions / 93.74% functions). Targets were chosen from
+`--show-missing-lines`, so every line below is one the report actually
+named as cold rather than a file picked by eye.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `client_ws.rs` | 69.27% | **93.20%** | +23.93 | 133 → 233 (+100) |
+| `sieve/mod.rs` | 76.92% | **100.00%** | +23.08 | 10 → 31 (+21) |
+| `core/copy.rs` | 78.95% | **99.39%** | +20.44 | 60 → 162 (+102) |
+| `push_subscription/mod.rs` | 81.25% | **100.00%** | +18.75 | 13 → 37 (+24) |
+| `vacation_response/mod.rs` | 81.25% | **100.00%** | +18.75 | 13 → 37 (+24) |
+| `identity/mod.rs` | 82.35% | **100.00%** | +17.65 | 14 → 39 (+25) |
+| `core/get.rs` | 82.43% | **99.30%** | +16.87 | 61 → 142 (+81) |
+| `email_submission/mod.rs` | 84.21% | **100.00%** | +15.79 | 16 → 43 (+27) |
+| `sieve/set.rs` | 87.18% | **100.00%** | +12.82 | 34 → 79 (+45) |
+| `identity/get.rs` | 88.89% | **100.00%** | +11.11 | 24 → 53 (+29) |
+| `client.rs` | 84.05% | **95.02%** | +10.97 | 274 → 420 (+146) |
+| **TOTAL** | **96.30%** | **97.61%** | **+1.31** | **9875 → 10499 (+624)** |
+
+Regions 95.64% → **96.67%** (+1.03) and functions 93.74% → **95.47%**
+(+1.73) over the same increment; uncovered lines 379 → **257**. Seven of
+the eleven targets closed to 100.00%, and the four that did not are all
+held back by transport-level code no unit test can reach.
+
+**Lines deliberately not chased** (each needs a live socket or a real
+redirect, per the brief):
+
+- `client.rs:226-248` and `client.rs:366-378` — the two
+  `redirect::Policy::custom` closure bodies. They run only when an actual
+  HTTP 3xx arrives and asks the policy whether to follow it; a unit test
+  with no server never invokes them.
+- `client.rs:431` and `client.rs:478` — the `?`-propagation and
+  non-`application/problem+json` arms of the response decoder, both of
+  which need a real `reqwest::Response` (or a real transport failure) to
+  distinguish.
+- `client_ws.rs:236-248` — the `wss://` + `accept_invalid_certs` branch
+  of `connect_ws`, which builds the dangerous verifier and dials a TLS
+  socket in one step. The verifier it installs *is* now covered directly
+  (`DummyVerifier`'s three hooks), so only the dial itself remains cold.
+
+`core/copy.rs` and `core/get.rs` each report **1** uncovered line that
+`--show-missing-lines` does not name — the same macro-attribution artefact
+recorded for P8 and P9, not untested logic.
 
 ## Findings log
 
@@ -1648,4 +1749,65 @@ _Discovered writing the P8 in-crate unit tests against `core/response.rs`,
     behaviour for a non-patch type, but it means `set_id` is not a uniform
     "assign the id" operation across the trait — a generic helper cannot
     rely on it.
+98. **`#[should_panic]` reaches the `unimplemented!()` arms that Finding
+    #94 called unreachable — narrowing it.** A `#[should_panic(expected =
+    "not implemented")]` test drives `SetObject::new()` for
+    `SieveScript<Get>` and passes, so the panic arm is coverable in-crate
+    without a network; what Finding #94 listed as "cannot be reached
+    without failing the run" is only unreachable for tests that insist on
+    being green. The residual of #94 is the *callers* of that arm, which
+    still need a live method dispatch to hit.
+99. **`rustls`'s `DigitallySignedStruct::new()` is `pub(crate)`, but
+    `Codec::read` builds one offline.** To exercise
+    `DummyVerifier::{verify_server_cert,verify_tls12_signature,
+    verify_tls13_signature}` without a TLS server, decode the struct from
+    its own wire form:
+    `<DigitallySignedStruct as Codec>::read(&mut Reader::init(&[]))`.
+    An empty body decodes to exactly the empty value the verifier discards.
+    Two adjacent gotchas: `UnixTime` has no `From<u64>`, so a
+    `ServerCertVerified`-style timestamp needs
+    `UnixTime::since_unix_epoch(Duration::from_secs(..))`; and
+    `ServerCertVerified` / `HandshakeSignatureValid` derive only `Debug`,
+    not `PartialEq`, so the assertion has to pin the rendered text rather
+    than compare values.
+100. **`forwarded_for` quotes IPv6 but not IPv4, and emits no other
+    directive.** `ClientBuilder::forwarded_for` produces bare
+    `for=203.0.113.7` for a V4 address and quoted `for="2001:db8::1"`
+    for a V6 one, matching RFC 7239 §6.1 — the quotes are required
+    because an IPv6 literal contains `:`, which is the parameter delimiter.
+    The builder never emits `by=`, `host=` or `proto=`, so the header the
+    client sends carries exactly one directive and a proxy expecting the
+    others will not find them.
+101. **`set_follow_redirects` replaces the trusted-host set rather than
+    merging it.** `Client::set_follow_redirects` assigns
+    `self.trusted_hosts = Arc::new(..collect())`, so calling it after
+    `ClientBuilder::follow_redirects([...])` silently discards the hosts
+    configured at build time. A caller who wants both sets must pass the
+    union in the second call; there is no additive form.
+102. **`CopyRequest::create(id)` stamps the object's own `id` with the
+    same string it uses as the map key, unlike the `Set` builders.**
+    `CopyRequest::create("x")` calls `object.set_id(Some("x"))` and keys
+    the entry `"x"`, so the patch and its key always agree.
+    `SetRequest::create()` instead mints a `c0`-style key while giving the
+    object the *numeric* index (`O::new(create_id.into())`), and
+    `SetRequest::create_with_id("x")` keys `"x"` but gives the object
+    `O::new(0.into())` — the supplied create id never reaches the object.
+    `CopyResponse::take_created()` then drops the keys and returns only
+    the values, so a caller who needs the mapping must use `created_ids()`
+    before draining.
+103. **`GetRequest::account_id()` is a silent no-op for types that do not
+    require an account.** The setter is guarded by
+    `if O::requires_account_id()`, so on an unscoped type (e.g.
+    `PushSubscription`, the one domain whose flag is `false`) calling
+    `.account_id("a1")` leaves the field `None` and returns `&mut self`
+    with no error. The same gate runs on the constructor side, so both
+    paths agree — but a generic helper cannot tell "not applicable" from
+    "forgot to set it".
+104. **`GetRequest::result_reference()` points at the request's *own*
+    method and call id.** It builds
+    `ResultReference(self.method.0, self.method.1, "/list/*/<property>")`,
+    not the method being referenced. Such a reference is therefore only
+    meaningful inside the same method's own response — a back-reference
+    from a `get`'s list to another argument of that same `get` — and
+    cannot be used to chain across two different methods.
 
