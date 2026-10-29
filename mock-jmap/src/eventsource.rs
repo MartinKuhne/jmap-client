@@ -5,6 +5,10 @@
 //! an `id:` field so a client that drops can come back with `Last-Event-ID` and
 //! be replayed from [`crate::push::PushBus`] history.
 //!
+//! [`crate::Shared::split_sse_frames`] turns that framing off for a test: each
+//! frame is then written as two chunks, the way a real transport cuts a frame at
+//! an arbitrary byte.
+//!
 //! Request parameters (RFC 8620 §7.3):
 //!
 //! * `types=*` — push every data type; `types=Mailbox,Email` — push only those.
@@ -194,10 +198,10 @@ pub async fn serve(
         .header("last-event-id")
         .and_then(|value| value.trim().parse::<u64>().ok());
 
-    let (mut receiver, replay, bus) = {
-        let bus = shared.lock().expect("mock-jmap: shared state poisoned").push.clone();
-        let (receiver, replay) = bus.subscribe(since);
-        (receiver, replay, bus)
+    let (mut receiver, replay, bus, split_frames) = {
+        let guard = shared.lock().expect("mock-jmap: shared state poisoned");
+        let (receiver, replay) = guard.push.subscribe(since);
+        (receiver, replay, guard.push.clone(), guard.split_sse_frames)
     };
 
     http::write_streaming_head(stream).await?;
@@ -207,7 +211,7 @@ pub async fn serve(
 
     for event in &replay {
         if params.matches(event) {
-            send(stream, event).await?;
+            send(stream, event, split_frames).await?;
             if params.close_after_state && event.is_state_change() {
                 return http::finish_stream(stream).await;
             }
@@ -222,7 +226,7 @@ pub async fn serve(
             received = receiver.recv() => match received {
                 Ok(event) => {
                     if params.matches(&event) {
-                        send(stream, &event).await?;
+                        send(stream, &event, split_frames).await?;
                         if params.close_after_state && event.is_state_change() {
                             break;
                         }
@@ -249,6 +253,25 @@ pub async fn serve(
     Ok(())
 }
 
-async fn send(stream: &mut TcpStream, event: &PushEvent) -> io::Result<()> {
-    http::write_chunk(stream, event.to_sse().as_bytes()).await
+/// Writes one SSE event.
+///
+/// With `split_frames` the frame is cut in half and written as two HTTP
+/// chunks, so the client's parser is handed a half-read `data:` field and
+/// must carry it over into the next read (RFC 8620 §7.1: the read boundary
+/// is not an event boundary).
+async fn send(stream: &mut TcpStream, event: &PushEvent, split_frames: bool) -> io::Result<()> {
+    let frame = event.to_sse();
+    if !split_frames {
+        return http::write_chunk(stream, frame.as_bytes()).await;
+    }
+
+    // Cut inside the `data:` payload when there is one, so the parser is
+    // stopped mid-value; otherwise straight down the middle.
+    let cut = frame
+        .find("changed")
+        .or_else(|| frame.find('{'))
+        .unwrap_or(frame.len() / 2);
+    let (head, tail) = frame.split_at(cut.max(1));
+    http::write_chunk(stream, head.as_bytes()).await?;
+    http::write_chunk(stream, tail.as_bytes()).await
 }

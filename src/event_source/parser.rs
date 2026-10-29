@@ -53,11 +53,40 @@ pub struct EventParser {
 
 impl EventParser {
     pub fn push_bytes(&mut self, bytes: Vec<u8>) {
-        self.bytes = Some(bytes);
+        // RFC 8620 §7.1: a frame may be cut at any byte, and the read
+        // boundary is not an event boundary. Whatever of the previous read
+        // has not been consumed yet is kept and the new bytes are appended
+        // to it, so a frame split across reads is reassembled rather than
+        // dropped. A read that was consumed to the end (or an error that
+        // left `pos` past the buffer) starts a fresh buffer.
+        let buffered = match self.bytes.take() {
+            Some(mut pending) if self.pos < pending.len() => {
+                pending.copy_within(self.pos.., 0);
+                pending.extend_from_slice(&bytes);
+                pending
+            }
+            _ => bytes,
+        };
+        self.pos = 0;
+        self.bytes = Some(buffered);
     }
 
     pub fn needs_bytes(&self) -> bool {
         self.bytes.is_none()
+    }
+
+    /// Drops everything the parser holds mid-stream: the buffered bytes,
+    /// the half-read field and value, and the event being assembled.
+    ///
+    /// Every error path calls this, so a failed frame is reported once and
+    /// can neither repeat itself nor wedge the frames that follow it.
+    fn reset(&mut self) {
+        self.state = EventParserState::Init;
+        self.field.clear();
+        self.value.clear();
+        self.result = Event::default();
+        self.bytes = None;
+        self.pos = 0;
     }
 
     pub fn filter_notification(&mut self) -> Option<crate::Result<PushNotification>> {
@@ -132,6 +161,11 @@ impl Iterator for EventParser {
 
     fn next(&mut self) -> Option<Self::Item> {
         let bytes = self.bytes.as_ref()?;
+        // The oversized-event error cannot be returned from inside the loop:
+        // the loop borrows the buffer, and the state has to be reset before
+        // the error leaves. So it is flagged, the scan stops, and the reset
+        // and the error are done together once the borrow is over.
+        let mut oversized = false;
 
         for byte in bytes.get(self.pos..)? {
             self.pos += 1;
@@ -166,9 +200,8 @@ impl Iterator for EventParser {
                     }
                     _ => {
                         if self.field.len() >= MAX_EVENT_SIZE {
-                            return Some(Err(crate::Error::Internal(
-                                "EventSource response is too long.".to_string(),
-                            )));
+                            oversized = true;
+                            break;
                         }
 
                         self.field.push(*byte);
@@ -206,15 +239,28 @@ impl Iterator for EventParser {
                     }
                     _ => {
                         if (self.field.len() + self.value.len()) >= MAX_EVENT_SIZE {
-                            return Some(Err(crate::Error::Internal(
-                                "EventSource response is too long.".to_string(),
-                            )));
+                            oversized = true;
+                            break;
                         }
 
                         self.value.push(*byte);
                     }
                 },
             }
+        }
+
+        if oversized {
+            // The frame is undeliverable and its remaining bytes are
+            // worthless: drop the buffer along with the half-read field,
+            // value and event, so this error is handed out exactly once and
+            // the next read starts from a clean parser. Whatever else was
+            // buffered behind the oversized frame goes with it — a stream
+            // that sends a 1 MiB event has already broken what the limit
+            // protects.
+            self.reset();
+            return Some(Err(crate::Error::Internal(
+                "EventSource response is too long.".to_string(),
+            )));
         }
 
         self.bytes = None;
@@ -563,6 +609,161 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "Internal error: EventSource response is too long.");
+    }
+
+    /// The two halves of `frame`, cut at the first byte of `marker`: the way
+    /// a transport read can cut an event in the middle of its payload.
+    fn split_frame(frame: &str, marker: &str) -> (Vec<u8>, Vec<u8>) {
+        let cut = frame.find(marker).unwrap();
+        let bytes = frame.as_bytes();
+        (bytes[..cut].to_vec(), bytes[cut..].to_vec())
+    }
+
+    /// RFC 8620 §7.1 — a `StateChange` frame may be cut at any byte by the
+    /// transport: the read boundary is not an event boundary. Feeding the
+    /// frame in two reads must still produce exactly one complete event.
+    #[test]
+    fn a_state_change_split_across_two_reads_is_parsed_once_and_completely() {
+        // Cut in the middle of the JSON payload, where the parser is
+        // mid-value with a half-read `data:` field.
+        let (head, tail) = split_frame(&format!("id: 7\ndata: {STATE_CHANGE}\n\n"), "StateChange");
+
+        let mut parser = EventParser::default();
+        parser.push_bytes(head);
+        assert!(
+            parser.filter_notification().is_none(),
+            "a half frame must not dispatch anything"
+        );
+        assert!(
+            parser.needs_bytes(),
+            "having read the half frame to the end, the parser asks for more"
+        );
+
+        parser.push_bytes(tail);
+        assert_eq!(
+            parser.filter_notification().unwrap().unwrap(),
+            PushNotification::StateChange(Changes::new(
+                Some("7".to_string()),
+                one_mailbox_change()
+            )),
+            "the two reads make one complete notification"
+        );
+        assert!(
+            parser.filter_notification().is_none(),
+            "and the notification is delivered exactly once"
+        );
+    }
+
+    /// `push_bytes` is public API, and a caller that hands over the next
+    /// read before the previous one has been drained must not have the
+    /// unread bytes thrown away: what has not been consumed is kept.
+    #[test]
+    fn bytes_that_have_not_been_consumed_are_kept_across_pushes() {
+        let (head, tail) = split_frame(&format!("id: 7\ndata: {STATE_CHANGE}\n\n"), "StateChange");
+
+        let mut parser = EventParser::default();
+        parser.push_bytes(head);
+        // No `next()` in between: the first read is still entirely pending.
+        parser.push_bytes(tail);
+
+        assert_eq!(
+            parser.filter_notification().unwrap().unwrap(),
+            PushNotification::StateChange(Changes::new(
+                Some("7".to_string()),
+                one_mailbox_change()
+            )),
+            "the second read completes the first instead of replacing it"
+        );
+        assert!(
+            parser.filter_notification().is_none(),
+            "and nothing is delivered twice"
+        );
+    }
+
+    /// The same retention mid-event: a read that ends inside a field
+    /// leaves that field half-read, and the following read continues it.
+    #[test]
+    fn a_push_after_a_partial_read_continues_the_half_read_field() {
+        let (head, tail) = split_frame(&format!("id: 7\ndata: {STATE_CHANGE}\n\n"), "StateChange");
+
+        let mut parser = EventParser::default();
+        parser.push_bytes(head);
+        // Drain the partial read; it holds no blank line, so nothing is
+        // dispatched and the half-read `data:` field stays in place.
+        assert!(parser.next().is_none());
+
+        parser.push_bytes(tail);
+        assert_eq!(
+            parser.filter_notification().unwrap().unwrap(),
+            PushNotification::StateChange(Changes::new(
+                Some("7".to_string()),
+                one_mailbox_change()
+            )),
+            "the value picks up where the previous read stopped"
+        );
+    }
+
+    /// An oversized event is one error, not a permanent one: once the
+    /// offending frame is past, the next well-formed frame must be
+    /// delivered. Without a reset the limit-tripping `field`/`value`/`state`
+    /// and a `pos` past the end of the buffer are left behind, so every later
+    /// frame either trips the same limit again or is never read at all.
+    #[test]
+    fn the_parser_recovers_after_an_oversized_event() {
+        const MAX_EVENT_SIZE: usize = 1024 * 1024;
+
+        let mut parser = EventParser::default();
+        parser.push_bytes(vec![b'x'; MAX_EVENT_SIZE + 1]);
+        assert_eq!(
+            parser
+                .filter_notification()
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "Internal error: EventSource response is too long.",
+            "the oversized frame is reported"
+        );
+
+        // A well-formed frame straight after the bad one must get through.
+        parser.push_bytes(
+            format!("id: 8\ndata: {STATE_CHANGE}\n\n")
+                .as_bytes()
+                .to_vec(),
+        );
+        assert_eq!(
+            parser.filter_notification().unwrap().unwrap(),
+            PushNotification::StateChange(Changes::new(
+                Some("8".to_string()),
+                one_mailbox_change()
+            )),
+            "the parser recovers instead of repeating the error"
+        );
+    }
+
+    /// The other half of recovery: the error must not be re-emitted for
+    /// the bytes that are still buffered behind it, and the parser must
+    /// not stay wedged once the frame is over.
+    #[test]
+    fn an_oversized_event_error_is_reported_once_and_the_parser_is_reset() {
+        const MAX_EVENT_SIZE: usize = 1024 * 1024;
+
+        let mut chunk = b"data:".to_vec();
+        chunk.resize(MAX_EVENT_SIZE + 5, b'y');
+        let mut parser = EventParser::default();
+        parser.push_bytes(chunk);
+
+        assert_eq!(
+            parser.next().unwrap().unwrap_err().to_string(),
+            "Internal error: EventSource response is too long."
+        );
+        assert!(
+            parser.needs_bytes(),
+            "the failed frame is dropped, so the parser asks for a new one"
+        );
+        assert!(
+            parser.next().is_none(),
+            "the same error is not handed out again for the same bytes"
+        );
     }
 
     /// Finding #81 — without the `debug` feature a `ping` event is

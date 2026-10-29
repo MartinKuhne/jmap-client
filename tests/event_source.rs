@@ -256,6 +256,45 @@ async fn the_types_parameter_hides_the_types_that_were_not_asked_for() {
     assert!(!changes.has_type(DataType::Email));
 }
 
+#[tokio::test]
+async fn a_state_change_split_across_two_reads_is_delivered_once() {
+    let server = MockJmapServer::start();
+    let client = connected_client(&server).await;
+
+    // Every frame now leaves the mock as two HTTP chunks, cut inside the
+    // `data:` payload. RFC 8620 §7.1 puts no boundary between a transport
+    // read and an event, so the client has to carry the half-read field
+    // over into the next read.
+    server.handle().split_sse_frames();
+
+    let mut stream = client
+        .event_source(None::<Vec<DataType>>, false, None, None)
+        .await
+        .expect("event_source");
+
+    wait_for_subscribers(&server, 1).await;
+
+    let first = server.handle().trigger_state_change("Mailbox", "1");
+    let changes = into_changes(next_notification(&mut stream).await);
+    assert_eq!(
+        changes.id(),
+        Some(first.to_string()).as_deref(),
+        "the halves make one notification, with its own id"
+    );
+    assert_eq!(
+        changed_types(&changes),
+        vec![("Mailbox".to_string(), "1".to_string())],
+        "and the payload survived the cut intact"
+    );
+
+    // A second split frame: the join between reads has to be crossed more
+    // than once, with nothing lost or duplicated in between.
+    let second = server.handle().trigger_state_change("Email", "2");
+    let changes = into_changes(next_notification(&mut stream).await);
+    assert_eq!(changes.id(), Some(second.to_string()).as_deref());
+    assert_eq!(changed_types(&changes), vec![("Email".to_string(), "2".to_string())]);
+}
+
 // ---------------------------------------------------------------------------
 // closeafter=state
 // ---------------------------------------------------------------------------

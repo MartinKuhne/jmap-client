@@ -149,6 +149,13 @@ pub struct Shared {
     pub log: Vec<RequestRecord>,
     /// The fan-out bus behind EventSource and WebSocket push.
     pub push: PushBus,
+    /// Writes every EventSource frame as two HTTP chunks instead of one.
+    ///
+    /// RFC 8620 §7.1 lets the transport cut a frame at any byte, and the cut
+    /// is not an event boundary. Real servers do this by accident; the mock
+    /// does it on purpose (see [`MockHandle::split_sse_frames`]) so a test can
+    /// prove the client reassembles a frame that arrives in pieces.
+    pub split_sse_frames: bool,
 }
 
 impl Shared {
@@ -395,6 +402,17 @@ impl MockHandle {
         self.inner.lock().unwrap().max_size_upload = bytes;
     }
 
+    /// Writes every EventSource frame as two HTTP chunks (see
+    /// [`Shared::split_sse_frames`]).
+    ///
+    /// The cut lands inside the `data:` line, so the client's parser is
+    /// handed a half-read field and has to carry it over to the next read.
+    /// Set it before opening the stream: it applies to frames written from
+    /// then on.
+    pub fn split_sse_frames(&self) {
+        self.inner.lock().unwrap().split_sse_frames = true;
+    }
+
     /// The session document this mock serves.
     pub fn session_json(&self) -> Value {
         let guard = self.inner.lock().unwrap();
@@ -456,6 +474,7 @@ impl MockJmapServer {
             max_size_upload: MAX_SIZE_UPLOAD,
             log: Vec::new(),
             push: PushBus::new(),
+            split_sse_frames: false,
         }));
         let shutdown = Arc::new(Notify::new());
 

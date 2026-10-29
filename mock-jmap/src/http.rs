@@ -396,11 +396,10 @@ pub async fn write_streaming_head(stream: &mut TcpStream) -> io::Result<()> {
 /// in the socket buffer until the next one arrives, and a client waiting for
 /// `closeafter=state` would wait forever.
 ///
-/// The framing and the payload go out in a **single** write for the same reason
-/// [`write_response`] does: `jmap_client`'s SSE parser replaces its buffer on
-/// every `Bytes` it is handed rather than appending, so an event that is split
-/// across two reads is lost instead of reassembled. One chunk, one write, one
-/// segment keeps every event whole by the time it reaches the parser.
+/// A frame does not have to fit in one chunk: RFC 8620 §7.1 lets the transport
+/// cut an event at any byte, and `jmap_client`'s SSE parser keeps the bytes it
+/// has not consumed and appends the next read to them. Tests that want the
+/// single-segment framing can get it from [`crate::Shared::split_sse_frames`].
 pub async fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
     let mut frame = format!("{:x}\r\n", bytes.len()).into_bytes();
     frame.extend_from_slice(bytes);

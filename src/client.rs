@@ -29,7 +29,9 @@ use reqwest::{
 // `blocking` takes precedence over `async`: it enables maybe-async's `is_sync`
 // switch, which makes this API synchronous, so the async types must not be
 // imported alongside their blocking counterparts (they share the same names).
-#[cfg(all(feature = "async", not(feature = "blocking")))]
+// With `blocking` off the async types are the only ones the maybe-async API can
+// be built on, whether or not the `async` feature itself is on.
+#[cfg(not(feature = "blocking"))]
 use reqwest::{Client as HttpClient, Response};
 use serde::de::DeserializeOwned;
 use std::{
@@ -340,7 +342,10 @@ impl Client {
         Client {
             download_url: URLPart::parse(session.download_url()).unwrap(),
             upload_url: URLPart::parse(session.upload_url()).unwrap(),
-            #[cfg(feature = "async")]
+            // Same gate as the field itself: with `blocking` on, maybe-async
+            // compiles the synchronous API and the event-source plumbing
+            // (`event_source` module included) is not built at all.
+            #[cfg(all(feature = "async", not(feature = "blocking")))]
             event_source_url: URLPart::parse(session.event_source_url()).unwrap(),
             api_url: session.api_url().to_string(),
             session: Arc::new(parking_lot::Mutex::new(Arc::new(session))),
