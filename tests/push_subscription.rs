@@ -564,7 +564,7 @@ fn push_subscription_property_wire_names() {
         (Property::Expires, "expires"),
         (Property::Types, "types"),
     ] {
-        assert_eq!(serde_json::to_value(&property).unwrap(), json!(wire));
+        assert_eq!(serde_json::to_value(property).unwrap(), json!(wire));
         assert_eq!(property.to_string(), wire);
         assert_eq!(
             serde_json::from_value::<Property>(json!(wire)).unwrap(),

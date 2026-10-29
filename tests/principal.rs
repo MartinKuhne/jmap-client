@@ -1066,7 +1066,7 @@ fn principal_enum_wire_names() {
         (Property::Members, "members"),
         (Property::ShareWith, "shareWith"),
     ] {
-        assert_eq!(serde_json::to_value(&property).unwrap(), json!(wire));
+        assert_eq!(serde_json::to_value(property).unwrap(), json!(wire));
         assert_eq!(property.to_string(), wire);
         assert_eq!(serde_json::from_value::<Property>(json!(wire)).unwrap(), property);
     }
@@ -1085,7 +1085,7 @@ fn principal_enum_wire_names() {
         (ACL::Submit, "maySubmit", "submit"),
         (ACL::SetSeen, "maySetSeen", "setSeen"),
     ] {
-        assert_eq!(serde_json::to_value(&acl).unwrap(), json!(serde_name));
+        assert_eq!(serde_json::to_value(acl).unwrap(), json!(serde_name));
         assert_eq!(serde_json::from_value::<ACL>(json!(serde_name)).unwrap(), acl);
         assert_eq!(acl.to_string(), display);
     }

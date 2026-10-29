@@ -407,7 +407,7 @@ async fn sieve_script_replace_uploads_a_new_blob_and_reactivates_by_real_id() {
         .unwrap()
         .expect("the updated record must come back");
 
-    assert_eq!(script.is_active(), true);
+    assert!(script.is_active());
 
     let args = only_call(&server).await;
     assert_eq!(
@@ -781,7 +781,7 @@ fn sieve_property_wire_names() {
         (Property::BlobId, "blobId"),
         (Property::IsActive, "isActive"),
     ] {
-        assert_eq!(serde_json::to_value(&property).unwrap(), json!(wire));
+        assert_eq!(serde_json::to_value(property).unwrap(), json!(wire));
         assert_eq!(property.to_string(), wire);
         assert_eq!(
             serde_json::from_value::<Property>(json!(wire)).unwrap(),

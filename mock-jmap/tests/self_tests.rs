@@ -916,7 +916,7 @@ fn oversize_upload_is_rejected() {
                 ("Authorization", AUTH.into()),
                 ("Content-Type", "application/octet-stream".into()),
             ],
-            &vec![0u8; 64],
+            &[0u8; 64],
         ),
     );
     assert_eq!(status, 413);

@@ -217,10 +217,7 @@ impl SseReader {
 
     /// Asserts the stream stays silent for `window`.
     async fn expect_silence(&mut self, window: Duration) {
-        match tokio::time::timeout(window, self.next()).await {
-            Ok(got) => panic!("expected silence, got {got:?}"),
-            Err(_) => (),
-        }
+        if let Ok(got) = tokio::time::timeout(window, self.next()).await { panic!("expected silence, got {got:?}") }
     }
 
     /// Asserts the stream ends (terminating chunk or EOF).
@@ -278,7 +275,7 @@ async fn open_stream(server: &MockJmapServer, query: &str) -> SseReader {
 
 thread_local! {
     /// `Last-Event-ID` for the next [`open_stream`], set by the resume tests.
-    static LAST_EVENT_ID: Mutex<Option<String>> = Mutex::new(None);
+    static LAST_EVENT_ID: Mutex<Option<String>> = const { Mutex::new(None) };
 }
 
 fn with_last_event_id(id: &str) {
@@ -430,10 +427,7 @@ async fn recv_text(ws: &mut WsConn) -> String {
 }
 
 async fn expect_no_frame(ws: &mut WsConn) {
-    match tokio::time::timeout(QUIET, ws.next()).await {
-        Ok(got) => panic!("expected no frame, got {got:?}"),
-        Err(_) => (),
-    }
+    if let Ok(got) = tokio::time::timeout(QUIET, ws.next()).await { panic!("expected no frame, got {got:?}") }
 }
 
 fn request_frame(id: &str, using: &[&str], calls: Vec<Value>) -> Value {
