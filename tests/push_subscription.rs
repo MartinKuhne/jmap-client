@@ -604,3 +604,83 @@ fn a_push_subscription_carries_only_the_seven_rfc_members() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `Request::send_set_push_subscription` convenience wrapper
+//
+// `Request::send_set_push_subscription` is a thin `self.send_single().await`
+// (src/push_subscription/helpers.rs:116-118). The `Client::push_subscription_*`
+// helpers call `send_single` directly, so nothing else in the crate reaches the
+// wrapper by name. The test builds the patch through the typed builder, sends
+// it through the wrapper, asserts the parsed result, and spies on the wire so
+// it cannot pass on an empty `methodCalls` array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_set_push_subscription_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 8620 §7.2.3 — verifying a subscription patches `verificationCode`.
+    mount_one(
+        &server,
+        "PushSubscription/set",
+        updated(json!({ "verificationCode": "12345678" })),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .set_push_subscription()
+        .update(SUBSCRIPTION_ID)
+        .verification_code("12345678");
+    let mut response = request.send_set_push_subscription().await.unwrap();
+
+    // RFC 8620 §7.3: like PushSubscription/get, the set method carries no
+    // accountId, and the crate models it as an Option, so the omission
+    // parses cleanly as None.
+    assert_eq!(response.account_id(), None);
+    let subscription = response
+        .updated(SUBSCRIPTION_ID)
+        .unwrap()
+        .expect("the verified subscription");
+    assert_eq!(subscription.verification_code(), Some("12345678"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "PushSubscription/set",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    assert_eq!(
+        body["methodCalls"][0][1]["update"][SUBSCRIPTION_ID],
+        json!({ "verificationCode": "12345678" })
+    );
+}
+
+#[tokio::test]
+async fn send_set_push_subscription_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(vec![method_error("s0", "forbidden")], SESSION_STATE),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .set_push_subscription()
+        .update(SUBSCRIPTION_ID)
+        .verification_code("00000000");
+    let err = request.send_set_push_subscription().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "PushSubscription/set"
+    );
+}

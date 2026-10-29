@@ -974,3 +974,83 @@ async fn identity_selection_prefers_an_exact_address_over_a_wildcard_identity() 
         "an unset `ids` means \"all identities\" (RFC 8621 §6.1)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `Request::send_changes_identity` convenience wrapper
+//
+// `Request::send_changes_identity` is a thin `self.send_single().await`
+// (src/identity/helpers.rs:124-126). `Client::identity_changes` calls
+// `send_single` directly, so nothing else in the crate reaches the wrapper by
+// name. The test builds the `/changes` call through the typed builder, sends
+// it through the wrapper, asserts the parsed result, and spies on the wire so
+// it cannot pass on an empty `methodCalls` array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_changes_identity_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 8621 §6.2 / RFC 8620 §5.2 — every member required (Finding #8).
+    mount_one(
+        &server,
+        "Identity/changes",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "oldState": "99401312ae-11-333",
+            "newState": "99401312ae-11-336",
+            "hasMoreChanges": false,
+            "created": ["ID-new"],
+            "updated": ["XD-3301-222-11_22AAz"],
+            "destroyed": ["ID-gone"]
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.changes_identity("99401312ae-11-333").max_changes(100);
+    let response = request.send_changes_identity().await.unwrap();
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    assert_eq!(response.old_state(), "99401312ae-11-333");
+    assert_eq!(response.new_state(), "99401312ae-11-336");
+    assert!(!response.has_more_changes());
+    assert_eq!(response.created(), ["ID-new"]);
+    assert_eq!(response.updated(), ["XD-3301-222-11_22AAz"]);
+    assert_eq!(response.destroyed(), ["ID-gone"]);
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "Identity/changes",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][1]["sinceState"], "99401312ae-11-333");
+    assert_eq!(body["methodCalls"][0][1]["maxChanges"], 100);
+}
+
+#[tokio::test]
+async fn send_changes_identity_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(
+            vec![method_error("s0", "cannotCalculateChanges")],
+            SESSION_STATE,
+        ),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.changes_identity("99401312ae-11-333");
+    let err = request.send_changes_identity().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Identity/changes"
+    );
+}

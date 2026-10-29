@@ -82,3 +82,50 @@ impl GetObject for Principal<Set> {
 impl GetObject for Principal<Get> {
     type GetArguments = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `Principal<Get>` id accessors against
+    //! RFC 4371 §3.3 (Principal objects). No server, no socket, no async.
+
+    use super::*;
+    use serde_json::json;
+
+    fn principal(value: serde_json::Value) -> Principal<Get> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// RFC 4371 §3.3 — `id` borrows the principal id and `take_id`
+    /// moves it out, leaving the record without one.
+    #[test]
+    fn take_id_moves_the_id_out() {
+        let mut principal = principal(json!({
+            "id": "P2342fnddd20",
+            "type": "individual",
+            "name": "Philip Jagger"
+        }));
+
+        assert_eq!(principal.id(), Some("P2342fnddd20"));
+        assert_eq!(principal.take_id(), "P2342fnddd20");
+        assert_eq!(
+            principal.id(),
+            None,
+            "taking the id must leave the record without one"
+        );
+        assert_eq!(
+            principal.name(),
+            Some("Philip Jagger"),
+            "taking the id must not disturb the other members"
+        );
+    }
+
+    /// RFC 4371 §3.3 — a record that never had an id yields the empty
+    /// string rather than panicking: the accessor is total.
+    #[test]
+    fn take_id_on_a_record_without_one_is_empty() {
+        let mut principal = principal(json!({ "type": "group" }));
+
+        assert_eq!(principal.id(), None);
+        assert_eq!(principal.take_id(), "");
+    }
+}

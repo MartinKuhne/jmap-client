@@ -21,10 +21,11 @@ use common::{
     ACCOUNT_ID, SESSION_STATE,
 };
 use jmap_client::core::query::{Comparator as SortComparator, Filter as QueryFilter};
+use jmap_client::core::request::ResultReference;
 use jmap_client::core::set::SetErrorType;
 use jmap_client::email::query as email_query;
 use jmap_client::email::{BodyProperty, EmailBodyPart, Header, HeaderValue, Property};
-use jmap_client::{Error, Get, Set};
+use jmap_client::{Error, Get, Method, Set};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1691,4 +1692,281 @@ async fn email_query_error_does_not_stop_a_paired_get_from_unwrapping() {
         .unwrap_get_email()
         .unwrap();
     assert_eq!(get.list()[0].subject(), Some("Dinner on Thursday?"));
+}
+
+// ---------------------------------------------------------------------------
+// 9. The `Request::send_import_email` / `send_parse_email` wrappers, and the
+//    cold `EmailImport` builder edges (src/email/import.rs)
+//
+// Both wrappers are a thin `self.send_single().await`
+// (src/email/helpers.rs:405-407, 418-420). The `Client::email_import*` and
+// `Client::email_parse` helpers call `send_single` directly, so nothing else
+// in the crate reaches them by name. `EmailImportRequest::if_in_state`,
+// `EmailImport::mailbox_ids_ref` and the "id in neither map" arm of
+// `EmailImportResponse::created` are only reachable through the
+// `Request::import_email()` builder, which the client helpers never drive
+// with those members set.
+// ---------------------------------------------------------------------------
+
+/// The blob the import fixtures reference (RFC 8621 §4.8 example shape).
+const IMPORT_BLOB_ID: &str = "Gf40b5f831efa7233b9eb1c7f8f97d84eeeee64f7";
+
+/// A `Email/import` response that created `i0` as `object` (RFC 8621 §4.8:
+/// `created` carries only `{id, blobId, threadId, size}`, Finding #50).
+fn import_created(object: Value) -> Value {
+    json!({
+        "accountId": ACCOUNT_ID,
+        "oldState": "780839",
+        "newState": "780840",
+        "created": { "i0": object }
+    })
+}
+
+/// The `created` record of the RFC §4.8 example.
+fn imported_email() -> Value {
+    json!({
+        "id": "Mf40b5f831efa7233b9eb1c7f",
+        "blobId": IMPORT_BLOB_ID,
+        "threadId": "Td957e72e89f516dc",
+        "size": 359
+    })
+}
+
+#[tokio::test]
+async fn send_import_email_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(&server, "Email/import", import_created(imported_email())).await;
+
+    let mut request = client.build();
+    request
+        .import_email()
+        .email(IMPORT_BLOB_ID)
+        .mailbox_ids(["2ea1ca41b38e"])
+        .keywords(["$seen"])
+        .received_at(1_531_184_708);
+    let mut response = request.send_import_email().await.unwrap();
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    assert_eq!(response.old_state(), Some("780839"));
+    assert_eq!(response.new_state(), "780840");
+    let email = response.created("i0").expect("the imported email");
+    assert_eq!(email.id(), Some("Mf40b5f831efa7233b9eb1c7f"));
+    assert_eq!(email.thread_id(), Some("Td957e72e89f516dc"));
+    assert_eq!(email.size(), 359);
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "Email/import",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    let args = &body["methodCalls"][0][1];
+    assert_eq!(args["accountId"], ACCOUNT_ID);
+    assert_eq!(
+        args["emails"]["i0"],
+        json!({
+            "blobId": IMPORT_BLOB_ID,
+            "mailboxIds": { "2ea1ca41b38e": true },
+            "keywords": { "$seen": true },
+            "receivedAt": "2018-07-10T01:05:08Z"
+        })
+    );
+}
+
+#[tokio::test]
+async fn send_import_email_with_if_in_state_puts_the_member_on_the_wire() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(&server, "Email/import", import_created(imported_email())).await;
+
+    // RFC 8620 §5.3: `ifInState` makes the whole set conditional on the
+    // account still being at the state the client last saw.
+    let mut request = client.build();
+    request
+        .import_email()
+        .if_in_state("780839")
+        .email(IMPORT_BLOB_ID)
+        .mailbox_ids(["2ea1ca41b38e"]);
+    let response = request.send_import_email().await.unwrap();
+    assert_eq!(response.new_state(), "780840");
+
+    let args = &single_jmap_request(&server).await["methodCalls"][0][1];
+    assert_eq!(args["ifInState"], "780839");
+    assert!(
+        args["emails"]["i0"].get("keywords").is_some(),
+        "`keywords` has no skip guard, so it rides as an empty map: {args}"
+    );
+    assert!(args["emails"]["i0"].get("receivedAt").is_none(), "{args}");
+}
+
+#[tokio::test]
+async fn send_import_email_with_a_mailbox_ids_reference_replaces_the_literals() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(&server, "Email/import", import_created(imported_email())).await;
+
+    // RFC 8620 §3.6: `#mailboxIds` stands in for the whole `mailboxIds`
+    // argument, resolved by the server from an earlier call in the same
+    // request. The client serialises the reference under the `#` key and
+    // drops the literal map.
+    let mut request = client.build();
+    request
+        .import_email()
+        .email(IMPORT_BLOB_ID)
+        .mailbox_ids(["stale"])
+        .mailbox_ids_ref(ResultReference::new(Method::QueryMailbox, 0, "/ids"));
+    let response = request.send_import_email().await.unwrap();
+    assert_eq!(response.new_state(), "780840");
+
+    let args = &single_jmap_request(&server).await["methodCalls"][0][1];
+    let imported = &args["emails"]["i0"];
+    assert!(
+        imported.get("mailboxIds").is_none(),
+        "the reference must have cleared the literal map: {imported}"
+    );
+    assert_eq!(
+        imported["#mailboxIds"],
+        json!({
+            "resultOf": "s0",
+            "name": "Mailbox/query",
+            "path": "/ids"
+        })
+    );
+}
+
+#[tokio::test]
+async fn send_import_email_created_of_an_unreported_id_is_an_internal_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // The server reported `i0` only; asking for `i1` matches neither `created`
+    // nor `notCreated`, which is the crate's `Error::Internal` arm rather
+    // than a SetError.
+    mount_one(&server, "Email/import", import_created(imported_email())).await;
+
+    let mut request = client.build();
+    request
+        .import_email()
+        .email(IMPORT_BLOB_ID)
+        .mailbox_ids(["2ea1ca41b38e"]);
+    let mut response = request.send_import_email().await.unwrap();
+
+    let err = response.created("i1").unwrap_err();
+    assert!(
+        matches!(err, Error::Internal(_)),
+        "an id in neither map must be Error::Internal, got {err:?}"
+    );
+    assert!(err.to_string().contains("Id i1 not found."), "{err}");
+    // The reported id is still there, and the id iterators agree.
+    assert_eq!(
+        response.created_ids().unwrap().cloned().collect::<Vec<_>>(),
+        ["i0"]
+    );
+    assert!(response.not_created_ids().is_none());
+}
+
+#[tokio::test]
+async fn send_import_email_reports_a_not_created_set_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "Email/import",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "oldState": "780839",
+            "newState": "780839",
+            "notCreated": {
+                "i0": {
+                    "type": "alreadyExists",
+                    "description": "That message is already imported"
+                }
+            }
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .import_email()
+        .email(IMPORT_BLOB_ID)
+        .mailbox_ids(["2ea1ca41b38e"]);
+    let mut response = request.send_import_email().await.unwrap();
+
+    let err = response.created("i0").unwrap_err();
+    let Error::Set(err) = err else {
+        panic!("expected a Set error, got {err:?}");
+    };
+    assert_eq!(err.error(), &SetErrorType::AlreadyExists);
+    assert_eq!(err.description(), Some("That message is already imported"));
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Email/import"
+    );
+}
+
+#[tokio::test]
+async fn send_parse_email_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "Email/parse",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "parsed": { IMPORT_BLOB_ID: rfc_email_get_example_record() },
+            "notParsable": null,
+            "notFound": null
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .parse_email()
+        .blob_ids([IMPORT_BLOB_ID])
+        .properties([Property::Subject])
+        .body_properties([BodyProperty::PartId]);
+    let mut response = request.send_parse_email().await.unwrap();
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    let email = response.parsed(IMPORT_BLOB_ID).expect("the parsed email");
+    assert_eq!(email.subject(), Some("Dinner on Thursday?"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "Email/parse",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    let args = &body["methodCalls"][0][1];
+    assert_eq!(args["blobIds"], json!([IMPORT_BLOB_ID]));
+    assert_eq!(args["properties"], json!(["subject"]));
+    assert_eq!(args["bodyProperties"], json!(["partId"]));
+}
+
+#[tokio::test]
+async fn send_parse_email_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(vec![method_error("s0", "invalidArguments")], SESSION_STATE),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.parse_email().blob_ids([IMPORT_BLOB_ID]);
+    let err = request.send_parse_email().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Email/parse"
+    );
 }

@@ -1128,3 +1128,135 @@ fn the_acl_map_round_trips_under_its_own_member_name() {
         json!(["mayReadItems"])
     );
 }
+
+// ---------------------------------------------------------------------------
+// The `Request::send_*` convenience wrappers
+//
+// `Request::send_{get,changes,set}_principal` are each a thin
+// `self.send_single().await` (src/principal/helpers.rs). The
+// `Client::principal_*` helpers call `send_single` directly, so nothing else
+// in the crate reaches these wrappers by name. Each test builds the call
+// through the typed builder, sends it through the wrapper, asserts the parsed
+// result, and spies on the wire so it cannot pass on an empty `methodCalls`
+// array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_get_principal_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "Principal/get",
+        principal_get_body(vec![joe_bloggs()], vec![]),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_principal().ids(["P1"]);
+    let mut response = request.send_get_principal().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    assert_eq!(response.not_found(), [] as [&str; 0]);
+    let principal = response.take_list().pop().expect("one record");
+    assert_eq!(principal.id(), Some("P2342fnddd20"));
+    assert_eq!(principal.name(), Some("Joe Bloggs"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "Principal/get",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    assert_eq!(body["methodCalls"][0][1]["ids"], json!(["P1"]));
+}
+
+#[tokio::test]
+async fn send_changes_principal_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 9670 §4.5 / RFC 8620 §5.2 — every member required (Finding #8).
+    mount_one(
+        &server,
+        "Principal/changes",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "oldState": "4242",
+            "newState": "4250",
+            "hasMoreChanges": false,
+            "created": ["P2"],
+            "updated": ["P1"],
+            "destroyed": ["P0"]
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.changes_principal("4242").max_changes(32);
+    let response = request.send_changes_principal().await.unwrap();
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    assert_eq!(response.old_state(), "4242");
+    assert_eq!(response.new_state(), "4250");
+    assert!(!response.has_more_changes());
+    assert_eq!(response.created(), ["P2"]);
+    assert_eq!(response.updated(), ["P1"]);
+    assert_eq!(response.destroyed(), ["P0"]);
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "Principal/changes");
+    assert_eq!(body["methodCalls"][0][1]["sinceState"], "4242");
+    assert_eq!(body["methodCalls"][0][1]["maxChanges"], 32);
+}
+
+#[tokio::test]
+async fn send_set_principal_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "Principal/set",
+        updated_principal(json!({ "name": "Renamed" })),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.set_principal().update("P1").name("Renamed");
+    let mut response = request.send_set_principal().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    let principal = response.updated("P1").unwrap().expect("updated record");
+    assert_eq!(principal.name(), Some("Renamed"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "Principal/set");
+    assert_eq!(
+        body["methodCalls"][0][1]["update"]["P1"],
+        json!({ "name": "Renamed" })
+    );
+}
+
+#[tokio::test]
+async fn send_set_principal_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(vec![method_error("s0", "unknownMethod")], SESSION_STATE),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.set_principal().update("P1").name("Renamed");
+    let err = request.send_set_principal().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Principal/set"
+    );
+}

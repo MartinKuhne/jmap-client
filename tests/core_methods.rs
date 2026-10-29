@@ -1016,6 +1016,73 @@ async fn an_unrecognised_method_error_type_is_a_parse_error() {
     );
 }
 
+#[tokio::test]
+async fn an_unrecognised_method_error_on_a_set_response_is_swallowed_as_an_empty_success() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+
+    // Hazard, pinned (Finding #112). `SingleMethodResponse` is
+    // `#[serde(untagged)]` (src/core/response.rs:104-109), so the `Error`
+    // arm is tried first and only *its* deserialisation failure moves on to
+    // `Ok`. `SetResponse` makes every member optional, so an `error`
+    // Invocation whose `type` is not modelled by `MethodErrorType`
+    // deserialises straight into an all-`None` `SetResponse` and the
+    // failure vanishes without a trace.
+    //
+    // The Mailbox/get sibling above at least surfaces Error::Parse, because
+    // `GetResponse` has required members the error body cannot satisfy. A
+    // Set call silently reports "nothing happened", which a caller cannot
+    // tell apart from a patch that legitimately changed nothing.
+    mount_jmap(
+        &server,
+        jmap_response(
+            vec![method_error("s0", "tooManySubscriptions")],
+            SESSION_STATE,
+        ),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.set_mailbox().update("mf2").name("Renamed");
+    let mut response = request
+        .send_set_mailbox()
+        .await
+        .expect("the untagged fall-through reads the error body as an empty SetResponse");
+
+    assert_eq!(
+        response.account_id(),
+        None,
+        "nothing of the error body survives into the parsed response"
+    );
+    assert_eq!(
+        response.new_state(),
+        "",
+        "an empty newState is the only hint that nothing was returned"
+    );
+    let swallowed = response.updated("mf2").err();
+    assert!(
+        swallowed.is_some(),
+        "the caller's only signal is a generic internal error, not the server's method error"
+    );
+    assert_eq!(
+        swallowed.unwrap().to_string(),
+        "Internal error: Id mf2 not found.",
+        "the swallowed method error surfaces as a lookup miss, so a caller \
+         cannot tell 'the server refused' from 'the id was not in the map'"
+    );
+    assert!(
+        response.updated_ids().is_none(),
+        "and no updated ids are reported either"
+    );
+
+    // The call really did go out, so this is the response to *our* request
+    // and not a fixture that never matched (Finding #31).
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Mailbox/set"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 10. request-level problem on POST
 // ---------------------------------------------------------------------------

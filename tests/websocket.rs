@@ -198,6 +198,36 @@ async fn a_ws_request_is_answered_and_correlated_by_request_id() {
     }
 }
 
+/// `Request::send_ws()` is the convenience wrapper that hands the whole
+/// request back to `Client::send_ws` (RFC 8887 §4.3.3). Every other test
+/// in this file drives the socket through the client directly, so this one
+/// pins the wrapper: it must return the id the connection's counter
+/// assigned, and the answer must arrive correlated to *that* id.
+#[tokio::test]
+async fn request_send_ws_returns_the_id_the_connection_assigned() {
+    let server = MockJmapServer::start();
+    let client = connected_client(&server).await;
+    let mut stream = client.connect_ws().await.expect("connect_ws");
+
+    let mut request = Request::new(&client);
+    request.get_mailbox();
+    let request_id = request.send_ws().await.expect("Request::send_ws");
+
+    assert_eq!(
+        request_id, "0",
+        "the wrapper must hand back the connection's first request id"
+    );
+
+    match recv(&mut stream).await {
+        WebSocketMessage::Response(response) => assert_eq!(
+            response.request_id(),
+            Some(request_id.as_str()),
+            "the id the wrapper returned is the id the Response is correlated to"
+        ),
+        other => panic!("expected a Response frame, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn two_sequential_requests_get_distinct_correctly_correlated_ids() {
     let server = MockJmapServer::start();

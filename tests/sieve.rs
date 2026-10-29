@@ -806,3 +806,223 @@ fn the_sieve_script_record_has_no_order_member() {
     keys.sort();
     assert_eq!(keys, ["blobId", "id", "isActive", "name"]);
 }
+
+// ---------------------------------------------------------------------------
+// 9. `rename` with `activate = true`
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sieve_script_rename_with_activate_renames_and_activates_in_one_call() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_one(
+        &server,
+        "SieveScript/set",
+        updated(json!({ "name": "renamed", "isActive": true })),
+    )
+    .await;
+
+    let script = client
+        .sieve_script_rename(SCRIPT_ID, "renamed", true)
+        .await
+        .unwrap()
+        .expect("the updated record must come back");
+
+    assert_eq!(script.name(), Some("renamed"));
+    assert!(script.is_active());
+
+    // The patch carries the new name *and* the activation argument keyed by the
+    // real script id — the same `on_success_activate_script_id` form `activate`
+    // uses, so the rename and the activation are atomic (draft §2.2).
+    let args = only_call(&server).await;
+    assert_eq!(args["update"][SCRIPT_ID], json!({ "name": "renamed" }));
+    assert_eq!(args["onSuccessActivateScript"], SCRIPT_ID);
+    assert!(
+        args.get("onSuccessDeactivateScript").is_none(),
+        "an activating rename must not also ask to deactivate: {args}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 10. The `Request::send_*` convenience wrappers
+//
+// Each `Request::send_<method>` is a thin `self.send_single().await` wrapper
+// (src/sieve/helpers.rs). Nothing in the `Client::sieve_script_*` family calls
+// them — the client helpers go straight to `send_single` — so without a test
+// that reaches the wrapper by name it stays cold. Each test below builds the
+// call through the typed builder, sends it through the wrapper, asserts the
+// parsed result *and* spies on the wire so it cannot pass on an empty
+// `methodCalls` array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_get_sieve_script_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_one(
+        &server,
+        "SieveScript/get",
+        sieve_get_body(vec![test1_script()], vec![]),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_sieve_script().ids([SCRIPT_ID]);
+    let mut response = request.send_get_sieve_script().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    assert_eq!(response.not_found(), [] as [&str; 0]);
+    let script = response.take_list().pop().expect("one record");
+    assert_eq!(script.id(), Some(SCRIPT_ID));
+    assert_eq!(script.name(), Some("test1"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "SieveScript/get",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    assert_eq!(body["methodCalls"][0][1]["ids"], json!([SCRIPT_ID]));
+}
+
+#[tokio::test]
+async fn send_set_sieve_script_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_one(
+        &server,
+        "SieveScript/set",
+        updated(json!({ "name": "renamed" })),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.set_sieve_script().update(SCRIPT_ID).name("renamed");
+    let mut response = request.send_set_sieve_script().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    assert_eq!(response.new_state(), "1603742967.852315428-4096");
+    let script = response.updated(SCRIPT_ID).unwrap().expect("updated record");
+    assert_eq!(script.name(), Some("renamed"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "SieveScript/set");
+    assert_eq!(
+        body["methodCalls"][0][1]["update"][SCRIPT_ID],
+        json!({ "name": "renamed" })
+    );
+}
+
+#[tokio::test]
+async fn send_validate_sieve_script_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    // draft §2.4 / Finding #4: a clean script answers with `error: null` on a
+    // *successful* response.
+    mount_one(
+        &server,
+        "SieveScript/validate",
+        json!({ "accountId": ACCOUNT_ID, "error": null }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.validate_sieve_script(UPLOADED_BLOB_ID);
+    request.send_validate_sieve_script().await.unwrap();
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "SieveScript/validate");
+    assert_eq!(body["methodCalls"][0][1]["blobId"], UPLOADED_BLOB_ID);
+    assert_eq!(body["methodCalls"][0][1]["accountId"], ACCOUNT_ID);
+}
+
+#[tokio::test]
+async fn send_validate_sieve_script_surfaces_an_invalid_script_as_a_set_error() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_one(
+        &server,
+        "SieveScript/validate",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "error": {
+                "type": "invalidScript",
+                "description": "line 1: unknown command"
+            }
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.validate_sieve_script(UPLOADED_BLOB_ID);
+    // draft-ietf-jmap-sieve-12 §2.5 — an invalid script is reported in the
+    // response body's `error` member, not as a method-level Invocation. The
+    // wrapper therefore returns `Ok`, and the caller has to call
+    // `unwrap_error()` to turn the body-level SetError into an `Err`.
+    let response = request
+        .send_validate_sieve_script()
+        .await
+        .expect("validate answers with a body-level error, not a method error");
+    let err = response.unwrap_error().unwrap_err();
+
+    let Error::Set(err) = err else {
+        panic!("expected a Set error, got {err:?}");
+    };
+    assert_eq!(err.error(), &SetErrorType::InvalidScript);
+    assert_eq!(err.description(), Some("line 1: unknown command"));
+}
+
+#[tokio::test]
+async fn send_query_sieve_script_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_one(
+        &server,
+        "SieveScript/query",
+        query_body(vec![SCRIPT_ID], 1),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .query_sieve_script()
+        .filter(sieve_query::Filter::is_active(true))
+        .sort([sieve_query::Comparator::name()]);
+    let response = request.send_query_sieve_script().await.unwrap();
+
+    assert_eq!(response.ids(), [SCRIPT_ID]);
+    assert_eq!(response.total(), Some(1));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "SieveScript/query");
+    assert_eq!(body["methodCalls"][0][1]["filter"], json!({ "isActive": true }));
+    assert_eq!(
+        body["methodCalls"][0][1]["sort"],
+        json!([{ "property": "name", "isAscending": true }])
+    );
+}
+
+#[tokio::test]
+async fn send_get_sieve_script_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(vec![method_error("s0", "unknownMethod")], SESSION_STATE),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_sieve_script().ids([SCRIPT_ID]);
+    let err = request.send_get_sieve_script().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "SieveScript/get"
+    );
+}

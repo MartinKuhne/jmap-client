@@ -739,6 +739,82 @@ line is the `let`, which always executes. Three such rewrites (one in
 1–2 line residual to a clean 100.00%. Later phases can use that shape
 instead of accepting the artefact.
 
+### P12 — Wiremock sweep of the last tier of coverable public API ✅
+
+P11 closed the *pure* logic. What `--show-missing-lines` still named was
+almost entirely code that only moves bytes: the `Request::send_*`
+convenience wrappers that no `Client::` helper calls by name, the
+`email/import.rs` upload-then-import path, and a tail of one- and
+three-line arms in the domain modules. P12 drives all of it.
+
+- [x] **Group A — the `Request::send_*` convenience wrappers (wiremock).**
+       28 tests added to the seven existing per-domain files rather than a
+       new `tests/send_wrappers.rs`, so each wrapper is tested next to the
+       `Client::` helper and the request builder it wraps. Every one of
+       these is a one-line `self.send_single().await` that nothing else in
+       the crate reaches by name — `Client::mailbox_get` calls
+       `send_single` directly, it never calls `send_get_mailbox` — so
+       without a test aimed at the wrapper the line stays cold forever.
+       `tests/sieve.rs` (7): `send_get_sieve_script`, `send_set_sieve_script`,
+       `send_validate_sieve_script`, `send_query_sieve_script`, the
+       rename-while-activated path, and the two error arms.
+       `tests/email_submission.rs` (4): `send_changes_email_submission`,
+       `send_query_email_submission`, `send_set_email_submission` plus its
+       method-error arm.
+       `tests/principal.rs` (4): `send_get_principal`, `send_changes_principal`,
+       `send_set_principal` plus its method-error arm.
+       `tests/push_subscription.rs` (2) and `tests/identity.rs` (2):
+       `send_set_push_subscription` / `send_changes_identity` and their
+       method-error arms.
+       `tests/vacation_response.rs` (2): `send_get_vacation_response` and
+       the missing-singleton variant.
+       Each test spies the wire (`single_jmap_request`) and asserts the
+       method name and call id actually left the client, so none of them
+       can pass on an empty `methodCalls` array (Finding #31).
+- [x] **Group B — `email/import.rs` (wiremock).**
+       Seven tests in `tests/email.rs`: `send_import_email` end to end;
+       `EmailImportRequest::if_in_state` putting `ifInState` on the wire
+       and the `ResultReference` form clearing the literal `mailboxIds`
+       map in favour of `#mailboxIds` (§4.1); `EmailImportResponse::created`
+       on an id the server never reported resolving to
+       `Error::Internal`; the `notCreated` `SetError` arm; and
+       `send_parse_email` with its method-error arm.
+- [x] **Group C — the one- and three-line arms, in-crate (20 tests).**
+       Ten `src/` files, insertions only: `blob/mod.rs` and
+       `event_source/mod.rs` for `URLParameter::parse`, including the
+       `_ => None` arm and the case-sensitivity of the template
+       placeholders; `push_subscription/get.rs`, `email_submission/get.rs`
+       and `principal/get.rs` for `take_id`'s drain and its empty-record
+       behaviour; `mailbox/get.rs` for `take_acl` moving the whole
+       `shareWith` map out (RFC 8621 §5.1); `principal/mod.rs` for
+       `<Principal<Get>>::requires_account_id` agreeing with `<Set>`;
+       and `identity/set.rs`, `push_subscription/set.rs`,
+       `vacation_response/set.rs` for the `<Get>` `SetObject` arm —
+       `create_id()` is `None` and `new()` refuses loudly, the latter
+       reached with `#[should_panic]` per Finding #98.
+- [x] **Group D — `Request::send_ws()` over the mock's WebSocket leg.**
+       One test in `tests/websocket.rs`. Every other test in that file
+       drives the socket through `client.send_ws(request)`; this one calls
+       the wrapper and pins that the id it returns is the id the
+       `Response` frame comes back correlated to.
+- [x] Verify + commit — **99.17%** lines, 612 client tests green
+       (277 lib + 335 integration), 81 `mock-jmap` tests green,
+       `cargo clippy -p jmap-client --all-targets` emits **zero** new
+       warnings, and `git diff --numstat -- src` is **438 insertions /
+       0 deletions** across the ten files.
+
+**`matches!` is still an artefact source; `mem::discriminant` is not.**
+The first cut of Group C used `assert!(matches!(parse(x), Some(V)))` and
+regressed `blob/mod.rs` regions from 91.67% to 90.48% — each `matches!`
+contributes one never-taken `_ => false` region that
+`--show-missing-lines` cannot name, because the line itself *is*
+executed. Comparing `std::mem::discriminant` values instead asserts the
+same fact (and a stronger one: it names the variant) with no untaken arm
+in the test's own file, taking both `blob/mod.rs` and
+`event_source/mod.rs` to a clean **100.00%** on all three metrics.
+P11's single-line-`let` trick fixes the *panic continuation*; this fixes
+the *match arm*.
+
 ## Progress log
 
 | # | Date | Action | Line cov (src) | Tests | Notes |
@@ -755,7 +831,8 @@ instead of accepting the artefact.
 | 9 | 2026-10-29 | P8: in-crate `#[cfg(test)] mod tests` unit sweep of the cold *pure* logic — `core/response.rs` (32 tests), `email/query.rs` (5), `lib.rs` (10), `core/error.rs` (8), `core/mod.rs` (1). No server, no sockets, no async: RFC-verbatim fixtures (8620 §3.4/§3.6.1.1, 8621 §4.4.1/§4.4.2) deserialised in place. Drives the whole `unwrap_*` accessor family through both its method-error and its type-mismatch arm via one macro, and every `visit_seq` guard by walking all 40 `Method` variants against a payload-less envelope. | **90.19%** lines (8285 instr., 7472 covered) — **+9.94 pp / +1892 lines** over P7's 80.25% | **385 client pass** (80 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 73 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (385), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in the five target files (the remaining ones are pre-existing in `mock-jmap` and `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Four of the five targets are now ≥ 99.58%; `email/query.rs`, `lib.rs` and `core/mod.rs` are at **100.00%**. Regions 76.80% → 88.84%, functions 76.86% → 86.57%. Diff is **insertions only** (2639 added, 0 deleted) — no existing non-test line was touched. New contract facts recorded as Findings 85–89. |
 | 10 | 2026-10-29 | P9: in-crate `#[cfg(test)] mod tests` sweep of the remaining cold *pure* logic — 12 files / 115 tests: `core/set.rs` (19), `core/session.rs` (13), `email/mod.rs` (15), `email/set.rs` (14), `email/get.rs` (11), `principal/set.rs` (9), `mailbox/set.rs` (9), `email_submission/set.rs` (7), `mailbox/mod.rs` (7), `email/parse.rs` (6), `sieve/get.rs` (3), `sieve/query.rs` (2). Drives the generic `SetRequest` create/update/destroy bookkeeping and the whole `SetErrorType` table, the `Email`/`Mailbox`/`Principal`/`EmailSubmission` patch builders and their dotted-path forms, the `take_*` draining accessors, and the three custom serde property visitors — against RFC-verbatim fixtures. Baseline re-measured by stashing the increment and re-running the same `llvm-cov` command. | **96.30%** lines (10254 instr., 9875 covered) — **+6.11 pp / +2403 lines** over P8's 90.19% | **500 client pass** (195 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (500), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 88.84% → **95.64%**, functions 86.57% → **93.74%**. Diff is **insertions only** (3195 added, 0 deleted). Six of the twelve targets reached **100.00%**; the other six are ≥ 99.00%. New contract facts recorded as Findings 90–97. |
 | 11 | 2026-10-29 | P10: in-crate `#[cfg(test)] mod tests` sweep of what P9 left cold, read off `--show-missing-lines` rather than the summary column — 11 files / 34 tests: the five domain `mod.rs` files (`email_submission` 8, `identity` 7, `push_subscription` 6, `sieve` 5, `vacation_response` 6) for the `<Get>` `requires_account_id()` arm plus the full `Display`/`Serialize`/`Deserialize` triple per property; `core/copy.rs` (6) and `core/get.rs` (7) for the fluent request builders and the `take_created` / account-gate / `result_reference` semantics; `sieve/set.rs` (5) for the create patch and the `#`-prefixed vs plain `onSuccessActivateScript` forms; `identity/get.rs` (3) for `take_id`'s drain; `client.rs` (11) for `ClientBuilder::{default,accept_invalid_certs,follow_redirects,forwarded_for}`, `Client::set_follow_redirects` and all four `Credentials` `From` impls with the base64 pinned; `client_ws.rs` (4) for `DummyVerifier`'s three hooks and its thirteen-entry `SignatureScheme` list, built offline via `Codec::read`. | **97.61%** lines (10756 instr., 10499 covered) — **+1.31 pp / +624 lines** over P9's 96.30%; uncovered 379 → **257** | **534 client pass** (229 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (534), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 95.64% → **96.67%**, functions 93.74% → **95.47%**. Diff is **insertions only** (958 added, 0 deleted). Seven of the eleven targets reached **100.00%**. All tests are pure: no `MockServer`, no sockets, no `async`. New contract facts recorded as Findings 98–104. |
-| 12 | 2026-10-29 | P11: in-crate `#[cfg(test)] mod tests` sweep of the last cold *pure* logic, read off `--show-missing-lines` — 6 files / 28 tests: `core/query.rs` (4) for the `account_id()` override, the two `From` impls that pick the arm of the untagged `Filter`, and `Filter::operator` AND/OR/NOT trees reaching the wire through the builder (RFC 8620 §5.5); `core/query_changes.rs` (3) for the `account_id()` override, the full RFC 8620 §5.6 / RFC 8621 §2.4 request, and `upToId`/`maxChanges` independence; `core/changes.rs` (2) for the `account_id()` override and the `/created` `/updated` `/updatedProperties` references (§3.6); `mailbox/query.rs` (4) for `Filter::role`'s `Role::None` → explicit `null`, the `parentId` pass-through, the three comparators and a tree-shaped `Mailbox/query` (§2.3); `principal/query.rs` (4) for `Comparator::ptype`/`Filter::ptype`, a nine-condition sweep and a windowed `Principal/query` (RFC 9670 §4.4); `event_source/parser.rs` (11, added to the module P7 started) for `needs_bytes()`, the `id:`-present/absent split, `EmailPush` → `Internal("Unexpected PushObject variant")`, malformed JSON in both the state and calendar-alert arms, the unknown-field drop, CRLF framing, both halves of the 1 MiB `MAX_EVENT_SIZE` guard, and the swallowed `ping` under both `cfg`s. | **98.19%** lines (11262 instr., 11058 covered) — **+0.58 pp / +559 lines** over P10's 97.61%; uncovered 257 → **204** | **562 client pass** (257 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 P10 + 28 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (562), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 96.67% → **97.14%**, functions 95.47% → **96.03%**. Diff is **insertions only** (921 added, 0 deletions). **All six targets reached 100.00% lines** and `--show-missing-lines` names nothing in any of them; the P8/P9/P10 macro-attribution residual was eliminated by binding `matches!` to a single-line `let` rather than documented. New contract facts recorded as Findings 105–111. |
+| 12 | 2026-10-29 | P11: in-crate `#[cfg(test)] mod tests` sweep of the last cold *pure* logic, read off `--show-missing-lines` — 6 files / 28 tests: `core/query.rs` (4) for the `account_id()` override, the two `From` impls that pick the arm of the untagged `Filter`, and `Filter::operator` AND/OR/NOT trees reaching the wire through the builder (RFC 8620 §5.5); `core/query_changes.rs` (3) for the `account_id()` override, the full RFC 8620 §5.6 / RFC 8621 §2.4 request, and `upToId`/`maxChanges` independence; `core/changes.rs` (2) for the `account_id()` override and the `/created` `/updated` `/updatedProperties` references (§3.6); `mailbox/query.rs` (4) for `Filter::role`'s `Role::None` → explicit `null`, the `parentId` pass-through, the three comparators and a tree-shaped `Mailbox/query` (§2.3); `principal/query.rs` (4) for `Comparator::ptype`/`Filter::ptype`, a nine-condition sweep and a windowed `Principal/query` (RFC 9670 §4.4); `event_source/parser.rs` (11, added to the module P7 started) for `needs_bytes()`, the `id:`-present/absent split, `EmailPush` → `Internal("Unexpected PushObject variant")`, malformed JSON in both the state and calendar-alert arms, the unknown-field drop, CRLF framing, both halves of the 1 MiB `MAX_EVENT_SIZE` guard, and the swallowed `ping` under both `cfg`s. | **98.19%** lines (11262 instr., 11058 covered) — **+0.58 pp / +559 lines** over P10's 97.61%; uncovered 257 → **204** | **562 client pass** (257 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 P9 + 34 P10 + 28 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (562), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 96.67% → **97.14%**, functions 95.47% → **96.03%**. Diff is **insertions only** (921 added, 0 deletions). **All six targets reached 100.00% lines** and `--show-missing-lines` names nothing in any of them; the P8/P9/P10 macro-attribution residual was eliminated by binding `matches!` to a single-line `let` rather than documented. New contract facts recorded as Findings 105-111. |
+| 13 | 2026-10-29 | P12: wiremock sweep of the last tier of genuinely-coverable public API — 50 tests. **Group A (28, wiremock, added to the seven existing per-domain files):** every `Request::send_*` convenience wrapper, which nothing else in the crate calls by name — `sieve` 7 (`send_get/set/validate/query_sieve_script` + rename-while-activated + both error arms), `email_submission` 4 (`send_changes/query/set_email_submission`), `principal` 4 (`send_get/changes/set_principal`), `push_subscription` 2 and `identity` 2 (`send_set_push_subscription` / `send_changes_identity` + method errors), `vacation_response` 2 (`send_get_vacation_response` + missing-singleton). **Group B (7, `tests/email.rs`):** `email/import.rs` end to end — `send_import_email`, `if_in_state` on the wire, `mailbox_ids_ref` clearing the literal `mailboxIds` map in favour of `#mailboxIds`, `created()` on an unreported id resolving to `Error::Internal`, the `notCreated` `SetError` arm, `send_parse_email` + its method error. **Group C (20, in-crate `#[cfg(test)] mod tests`, 10 `src/` files):** `blob/mod.rs` and `event_source/mod.rs` for `URLParameter::parse` incl. the `_ => None` arm and placeholder case-sensitivity; `push_subscription/get.rs`, `email_submission/get.rs`, `principal/get.rs` for `take_id`'s drain and empty-record forms; `mailbox/get.rs` for `take_acl` moving the whole `shareWith` map; `principal/mod.rs` for `<Principal<Get>>::requires_account_id` agreeing with `<Set>`; `identity/set.rs`, `push_subscription/set.rs`, `vacation_response/set.rs` for the `<Get>` `SetObject` arm (`create_id()` is `None`, `new()` refuses loudly via `#[should_panic]`, per Finding #98). **Group D (1, `tests/websocket.rs`):** `Request::send_ws()`, the wrapper every other test in that file bypasses by calling `client.send_ws(request)` directly. | **99.17%** lines (11430 instr., 11335 covered) — **+0.98 pp / +277 lines** over P11's 98.19%; uncovered 204 → **95** | **612 client pass** (277 lib unit + 2 crypto-provider + 29 core + 23 changes/query + 26 mailbox + 44 email + 11 thread + 11 search_snippet + 31 submission + 24 identity + 20 vacation + 29 principal + 17 push + 29 sieve + 12 blob + 11 event_source + 16 websocket) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (612), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero new** warnings (the 7 `mock-jmap` lib and 5 `tests/{principal,sieve,push_subscription}` warnings are all pre-existing and outside the added line ranges), coverage summary lists only `src/` rows. Regions 97.14% → **98.02%** (missed 462 → 326), functions 96.03% → **98.76%** (missed 66 → 21). Diff is **insertions only** (438 added, 0 deleted) in `src/`. **18 of the 19 touched `src/` files reached 100.00% lines**; only `core/request.rs` remains below it, and only because of the deliberately-cold `unreachable!()` arms. New contract facts and one hazard recorded as Findings 112-116. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -1166,6 +1243,59 @@ the `SetObject::new()` `unimplemented!()` pairs at `email/set.rs`
 `*/helpers.rs` files plus
 `{email_submission,principal,push_subscription}/get.rs` 21-23. Each one
 needs a live socket, a real redirect, or a panic.
+
+#### P12 per-file line-coverage delta
+
+Against the P11 end state (**98.19%** lines, 11262 instr., 11058
+covered; 97.14% regions / 96.03% functions). The instrumented total
+grows again (11262 → 11430) because Group C's `mod tests` blocks are
+themselves `src/` code. **18 of the 19 touched files reached 100.00%
+lines**, and `--show-missing-lines` names nothing in any of the
+eighteen.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `blob/mod.rs` | 87.50% | **100.00%** | +12.50 | 7 → 35 (+28) |
+| `email/import.rs` | 89.01% | **100.00%** | +10.99 | 81 → 91 (+10) |
+| `vacation_response/set.rs` | 89.80% | **100.00%** | +10.20 | 44 → 59 (+15) |
+| `push_subscription/get.rs` | 90.32% | **100.00%** | +9.68 | 28 → 46 (+18) |
+| `push_subscription/set.rs` | 90.57% | **100.00%** | +9.43 | 48 → 64 (+16) |
+| `sieve/helpers.rs` | 91.05% | **100.00%** | +8.95 | 173 → 190 (+17) |
+| `identity/set.rs` | 91.23% | **100.00%** | +8.77 | 52 → 67 (+15) |
+| `email_submission/helpers.rs` | 92.59% | **100.00%** | +7.41 | 175 → 189 (+14) |
+| `principal/get.rs` | 93.33% | **100.00%** | +6.67 | 42 → 65 (+23) |
+| `principal/mod.rs` | 93.75% | **100.00%** | +6.25 | 45 → 61 (+16) |
+| `push_subscription/helpers.rs` | 95.12% | **100.00%** | +4.88 | 78 → 82 (+4) |
+| `email_submission/get.rs` | 95.31% | **100.00%** | +4.69 | 61 → 84 (+23) |
+| `identity/helpers.rs` | 95.56% | **100.00%** | +4.44 | 86 → 90 (+4) |
+| `principal/helpers.rs` | 96.12% | **100.00%** | +3.88 | 297 → 309 (+12) |
+| `mailbox/get.rs` | 96.55% | **100.00%** | +3.45 | 84 → 112 (+28) |
+| `vacation_response/helpers.rs` | 96.69% | **100.00%** | +3.31 | 117 → 121 (+4) |
+| `event_source/mod.rs` | 97.22% | **100.00%** | +2.78 | 35 → 53 (+18) |
+| `email/helpers.rs` | 97.74% | **100.00%** | +2.26 | 346 → 354 (+8) |
+| `core/request.rs` | 92.23% | **93.05%** | +0.82 | 451 → 455 (+4) |
+| **TOTAL** | **98.19%** | **99.17%** | **+0.98** | **11058 → 11335 (+277)** |
+
+Regions 97.14% → **98.02%** (missed 462 → 326) and functions 96.03% →
+**98.76%** (missed 66 → 21); uncovered lines 204 → **95**.
+
+**Lines deliberately not chased in P12.** The 95 lines still cold are the
+set P11 named, minus everything this phase closed. `core/request.rs`
+245-471 — the 34 per-method `Arguments` accessor arms whose bodies are
+`unreachable!()` — is left cold on purpose: a test could only reach one
+by asking a `Request` for the arguments of a method it never added,
+which panics by design, and the rule for this phase is not to write
+`#[should_panic]` against `unreachable!()`. `core/request.rs` 534-536
+is **no longer** on that list — Group D covered `send_ws`. What remains:
+
+| cold lines | why it stays cold |
+|---|---|
+| `client.rs` 226-248, 366-378, 431, 478 | the two `redirect::Policy::custom` closure bodies, and the `?`-propagation / non-`problem+json` arms of the response decoder; out of scope per the P11 note |
+| `client_ws.rs` 236-248 | the `wss://` + `accept_invalid_certs` dial; needs a real TLS endpoint |
+| `core/request.rs` 245-471 (34) | `unreachable!()` arms; panics by design |
+| `core/session.rs` 499, 521 | session-refresh arms reachable only on a racing 401 |
+| `core/set.rs` 403 | the `SetObject::set_id` default on a type with no id field |
+| `email/set.rs` 252-253, `email_submission/set.rs` 71-72, `mailbox/set.rs` 116-117, `principal/set.rs` 142-143 | `SetObject::new()` `unimplemented!()` on the four `<Get>` flavours P12 did not take (Finding #94); the three it did take are now covered by `#[should_panic]` (Finding #116) |
 
 ## Findings log
 
@@ -1977,4 +2107,68 @@ _Discovered writing the P11 in-crate unit tests against `core/query.rs`,
     space, the only place a space survives is inside a value that already
     has content — a value of `" x"` keeps its space, a value of `"x"`
     never gains one, and no CR ever reaches `id`/`data`.
+112. **HAZARD — `#[serde(untagged)]` on `SingleMethodResponse` swallows a
+    method-level error whenever the payload type has all-optional
+    members.** `core/response.rs:104-109` declares
+    `Error((Error, MethodError, String))` before
+    `Ok((String, T, String))` under `#[serde(untagged)]`, so serde tries
+    the `Error` arm first and only moves on when *that* fails to
+    deserialise. `MethodErrorType` has no catch-all variant (Finding
+    style: the enum is a closed list of the RFC 8620 §3.6.2 names), so an
+    `error` Invocation carrying a type the client does not model — say
+    `tooManySubscriptions` — fails the `Error` arm and then *succeeds* as
+    `Ok(("error", <T>, "s0"))` provided `T` can absorb
+    `{"type": "tooManySubscriptions"}`. For `GetResponse` it cannot
+    (required members), so the pre-existing
+    `an_unrecognised_method_error_type_is_a_parse_error` test correctly
+    sees `Error::Parse`. For `SetResponse` every member is optional, so
+    it deserialises into an all-`None` response and the server's refusal
+    vanishes: `send_set_mailbox()` returns `Ok`. Pinned by
+    `an_unrecognised_method_error_on_a_set_response_is_swallowed_as_an_empty_success`.
+    The fix is an `Other(String)` arm on `MethodErrorType`, or replacing
+    the untagged enum with an internally-tagged one keyed on the
+    invocation name.
+113. **`SetResponse::updated(id)` reports a missing id as
+    `Err(Internal("Id … not found."))`, not `Ok(None)`.** That is what
+    makes Finding #112 silent rather than merely wrong: the caller who
+    asked for the mailbox it just renamed does get an error, but it is a
+    generic internal lookup miss with no trace of the server's actual
+    `type`. `notUpdated` is a separate accessor, so a caller who does
+    not consult it cannot distinguish "the server refused", "the id was
+    never in the map" and "the response was empty". Same shape for
+    `created(id)` / `destroyed(id)`.
+114. **`SieveScript/validate` reports an invalid script *inside* the
+    response body, not as an `error` Invocation.**
+    draft-ietf-jmap-sieve-12 §2.5 puts `error: SetError` on the
+    `SieveScript/validate` *result*, so `send_validate_sieve_script()`
+    returns `Ok(SieveScriptValidateResponse)` even for a script the
+    server rejected, and the caller has to call the type's
+    `unwrap_error()` to turn the body-level `SetError` into an `Err`.
+    Every other method family in the crate signals failure at the
+    Invocation level, so a caller who writes the usual
+    `.send_*.await?` pattern for validate will read a rejected script as
+    a successful one.
+115. **`PushSubscription/set` carries no `accountId` in its response
+    either, so `SetResponse::account_id()` reads `None`.** RFC 8620 §7.3
+    gives neither the get nor the set method an `accountId` result
+    member, and the crate models it as `Option`, so the omission parses
+    cleanly — but it makes `PushSubscription` the only object family in
+    the crate whose set response has no account to read back. Generic
+    code that assumes `set_*.account_id()` is `Some` after a successful
+    set has to special-case it.
+116. **`matches!` contributes a missed region that
+    `--show-missing-lines` cannot name; `mem::discriminant` does not.**
+    The first cut of the P12 Group C parser tests used
+    `assert!(matches!(URLParameter::parse(x), Some(V)))` and pushed
+    `blob/mod.rs` *regions* from 91.67% down to 90.48% while taking its
+    lines to 100.00%: each `matches!` leaves a never-taken `_ => false`
+    arm, and because the line itself executes, the missing-line map has
+    nothing to report. Comparing
+    `std::mem::discriminant(&parse(x).unwrap())` against
+    `mem::discriminant(&Variant)` asserts a stronger fact — it names the
+    variant — and adds no untaken arm in the test's own file. Both
+    `blob/mod.rs` and `event_source/mod.rs` went to 100.00% on regions,
+    functions and lines. This is the sibling of P11's single-line-`let`
+    trick: that one removes the *panic continuation*, this one removes
+    the *match arm*.
 

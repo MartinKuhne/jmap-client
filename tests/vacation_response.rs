@@ -811,3 +811,71 @@ fn vacation_response_property_display_matches_the_rfc_property_names() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The `Request::send_get_vacation_response` convenience wrapper
+//
+// `Request::send_get_vacation_response` is a thin `self.send_single().await`
+// (src/vacation_response/helpers.rs:144-146). `Client::vacation_response_get`
+// calls `send_single` directly, so nothing else in the crate reaches the
+// wrapper by name. The test asks for the singleton through the typed builder,
+// sends it through the wrapper, asserts the parsed record, and spies on the
+// wire so it cannot pass on an empty `methodCalls` array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_get_vacation_response_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "VacationResponse/get",
+        vacation_get_body(vec![enabled_singleton()], vec![]),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_vacation_response().ids(["singleton"]);
+    let mut response = request.send_get_vacation_response().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    assert_eq!(response.not_found(), [] as [&str; 0]);
+    let list = response.take_list();
+    assert_eq!(list.len(), 1, "the singleton is the only record");
+    assert!(list[0].is_enabled());
+    assert_eq!(list[0].subject(), Some("Out of the office"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "VacationResponse/get",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][2], "s0");
+    assert_eq!(body["methodCalls"][0][1]["ids"], json!(["singleton"]));
+}
+
+#[tokio::test]
+async fn send_get_vacation_response_of_a_missing_singleton_is_an_empty_list() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 8621 §8: an account with no vacation response configured answers
+    // with an empty `list`, which the wrapper hands back intact.
+    mount_one(
+        &server,
+        "VacationResponse/get",
+        vacation_get_body(vec![], vec!["singleton"]),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_vacation_response().ids(["singleton"]);
+    let mut response = request.send_get_vacation_response().await.unwrap();
+
+    assert!(response.take_list().is_empty());
+    assert_eq!(response.not_found(), ["singleton"]);
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "VacationResponse/get"
+    );
+}

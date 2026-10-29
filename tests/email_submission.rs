@@ -1314,3 +1314,147 @@ async fn email_submission_query_then_get_by_result_reference() {
     assert_eq!(call[1]["#ids"]["name"], "EmailSubmission/query");
     assert_eq!(call[1]["#ids"]["path"], "/ids");
 }
+
+// ---------------------------------------------------------------------------
+// 9. The `Request::send_*` convenience wrappers
+//
+// `Request::send_{changes,query,set}_email_submission` are each a thin
+// `self.send_single().await` (src/email_submission/helpers.rs). The
+// `Client::email_submission_*` helpers call `send_single` directly, so nothing
+// else in the crate ever reaches these wrappers by name. Each test builds the
+// call through the typed builder, sends it through the wrapper, asserts the
+// parsed result, and spies on the wire so it cannot pass on an empty
+// `methodCalls` array (Finding #31).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn send_changes_email_submission_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 8621 §7.2 — every `/changes` member is required (Finding #8).
+    mount_one(
+        &server,
+        "EmailSubmission/changes",
+        json!({
+            "accountId": ACCOUNT_ID,
+            "oldState": "104",
+            "newState": "107",
+            "hasMoreChanges": true,
+            "created": ["ES-new"],
+            "updated": ["ES-3bab7f9a"],
+            "destroyed": ["ES-old"]
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.changes_email_submission("104").max_changes(64);
+    let response = request.send_changes_email_submission().await.unwrap();
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    assert_eq!(response.old_state(), "104");
+    assert_eq!(response.new_state(), "107");
+    assert!(response.has_more_changes());
+    assert_eq!(response.created(), ["ES-new"]);
+    assert_eq!(response.updated(), ["ES-3bab7f9a"]);
+    assert_eq!(response.destroyed(), ["ES-old"]);
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(
+        body["methodCalls"][0][0],
+        "EmailSubmission/changes",
+        "the wrapper must put the method name on the wire"
+    );
+    assert_eq!(body["methodCalls"][0][1]["sinceState"], "104");
+    assert_eq!(body["methodCalls"][0][1]["maxChanges"], 64);
+}
+
+#[tokio::test]
+async fn send_query_email_submission_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "EmailSubmission/query",
+        query_body(&["ES-3bab7f9a"]),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .query_email_submission()
+        .filter(SubmissionFilter::identity_ids(["Id1"]))
+        .sort([SubmissionComparator::sent_at()]);
+    let response = request.send_query_email_submission().await.unwrap();
+
+    assert_eq!(response.ids(), ["ES-3bab7f9a"]);
+    assert_eq!(response.query_state(), "104:0");
+    assert_eq!(response.total(), Some(1));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "EmailSubmission/query");
+    assert_eq!(body["methodCalls"][0][1]["filter"], json!({ "identityIds": ["Id1"] }));
+    assert_eq!(
+        body["methodCalls"][0][1]["sort"],
+        json!([{ "property": "sentAt", "isAscending": true }])
+    );
+}
+
+#[tokio::test]
+async fn send_set_email_submission_sends_the_call_and_parses_the_response() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(&server, "EmailSubmission/set", submission_created_body()).await;
+
+    let mut request = client.build();
+    request
+        .set_email_submission()
+        .create_with_id("c0")
+        .email_id("M7f6ed5bcfd7e2604d1753f6c")
+        .identity_id("Id1");
+    let mut response = request.send_set_email_submission().await.unwrap();
+
+    assert_eq!(response.account_id(), Some(ACCOUNT_ID));
+    let created = response.created("c0").expect("the created submission");
+    assert_eq!(created.id(), Some("ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0"));
+
+    let body = single_jmap_request(&server).await;
+    assert_eq!(body["methodCalls"][0][0], "EmailSubmission/set");
+    assert_eq!(
+        body["methodCalls"][0][1]["create"]["c0"],
+        json!({
+            "identityId": "Id1",
+            "emailId": "M7f6ed5bcfd7e2604d1753f6c"
+        })
+    );
+}
+
+#[tokio::test]
+async fn send_set_email_submission_surfaces_a_method_error() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_jmap(
+        &server,
+        jmap_response(
+            vec![method_error("s0", "cannotCalculateChanges")],
+            SESSION_STATE,
+        ),
+    )
+    .await;
+
+    let mut request = client.build();
+    request
+        .set_email_submission()
+        .update("ES-3bab7f9a")
+        .undo_status(UndoStatus::Canceled);
+    let err = request.send_set_email_submission().await.unwrap_err();
+
+    assert!(
+        matches!(err, Error::Method(_)),
+        "the wrapper must propagate an `error` Invocation as Error::Method, got {err:?}"
+    );
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "EmailSubmission/set"
+    );
+}

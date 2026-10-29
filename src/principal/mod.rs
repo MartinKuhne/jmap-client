@@ -241,3 +241,41 @@ impl ChangesObject for Principal<Set> {
 impl ChangesObject for Principal<Get> {
     type ChangesResponse = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `Object` contract on both flavours of
+    //! `Principal` (RFC 4371 §4). No server, no socket, no async.
+
+    use super::*;
+
+    /// RFC 4371 §4.1 - §4.3 — every Principal method takes an
+    /// `accountId`, so both the patch and the fetched flavour report that
+    /// one is required. The `<Get>` arm is the one the generic request
+    /// machinery consults when it is handed a fetched record rather than
+    /// a patch, and it must agree with `<Set>` or the two paths would
+    /// disagree about whether to put `accountId` on the wire.
+    #[test]
+    fn both_principal_flavours_require_an_account_id() {
+        assert!(
+            <Principal<Set> as Object>::requires_account_id(),
+            "RFC 4371 §4.1 gives Principal/get an accountId argument"
+        );
+        assert!(
+            <Principal<Get> as Object>::requires_account_id(),
+            "the fetched flavour must agree with the patch flavour"
+        );
+    }
+
+    /// RFC 4371 §3 — the property enum is the `Property` associated type
+    /// on both flavours, and its wire names are the ones the RFC spells.
+    #[test]
+    fn the_property_type_is_shared_and_names_the_rfc_members() {
+        assert_eq!(Property::ShareWith.to_string(), "shareWith");
+        assert_eq!(Property::DKIM.to_string(), "dkim");
+        assert_eq!(
+            serde_json::to_value(Property::Timezone).unwrap(),
+            serde_json::json!("timezone")
+        );
+    }
+}

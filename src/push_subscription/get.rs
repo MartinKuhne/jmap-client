@@ -64,3 +64,42 @@ impl GetObject for PushSubscription<Set> {
 impl GetObject for PushSubscription<Get> {
     type GetArguments = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `PushSubscription<Get>` id accessors against
+    //! RFC 8620 §7.3 (Push Subscription objects). No server, no socket,
+    //! no async.
+
+    use super::*;
+    use serde_json::json;
+
+    fn subscription(value: serde_json::Value) -> PushSubscription<Get> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// RFC 8620 §7.3 — `id` borrows the subscription id and `take_id`
+    /// moves it out, leaving the record without one.
+    #[test]
+    fn take_id_moves_the_id_out() {
+        let mut sub = subscription(json!({ "id": "P1" }));
+
+        assert_eq!(sub.id(), Some("P1"));
+        assert_eq!(sub.take_id(), "P1");
+        assert_eq!(
+            sub.id(),
+            None,
+            "taking the id must leave the record without one"
+        );
+    }
+
+    /// RFC 8620 §7.3 — a record that never had an id yields the empty
+    /// string rather than panicking: the accessor is total.
+    #[test]
+    fn take_id_on_a_record_without_one_is_empty() {
+        let mut sub = subscription(json!({ "url": "https://example.com/push" }));
+
+        assert_eq!(sub.id(), None);
+        assert_eq!(sub.take_id(), "");
+    }
+}
