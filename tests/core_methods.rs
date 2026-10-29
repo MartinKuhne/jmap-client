@@ -231,6 +231,37 @@ async fn connect_reads_the_session_resource() {
 }
 
 #[tokio::test]
+async fn an_rfc_shaped_session_leaves_the_session_level_limit_accessors_empty() {
+    // RFC 8621 §1.3.1/§1.3.2 (and draft-ietf-jmap-sieve §1.3.1) say the
+    // *session-level* value of the mail and submission capabilities is an EMPTY
+    // object; the limits belong in `accounts/<id>/accountCapabilities`. The
+    // shared fixture duplicates the account object at session level so the
+    // typed accessors have something to read (see `tests/common/mod.rs`), which
+    // means no other test shows what a compliant server actually sends. This
+    // pins that gap so it stays visible instead of being hidden by the fixture.
+    let server = MockServer::start().await;
+    let mut session = session_json(&server).await;
+    session["capabilities"]["urn:ietf:params:jmap:mail"] = json!({});
+    session["capabilities"]["urn:ietf:params:jmap:submission"] = json!({});
+    let client = connected_client_json(&server, session).await;
+    let session = client.session();
+
+    // A compliant session still parses, and the capabilities are advertised...
+    assert!(session.has_capability("urn:ietf:params:jmap:mail"));
+    assert!(session.has_capability("urn:ietf:params:jmap:submission"));
+
+    // ...but an empty session-level object is filed under
+    // `Capabilities::Empty`, so the typed limit accessors find nothing. A
+    // caller that reads limits from the session rather than from the account
+    // gets None against a spec-conformant server.
+    assert!(session.mail_capabilities().is_none());
+    assert!(session.submission_capabilities().is_none());
+
+    // The account record carrying the real limits is still reachable.
+    assert!(session.account(ACCOUNT_ID).is_some());
+}
+
+#[tokio::test]
 async fn connect_sends_requests_to_the_sessions_api_url() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
@@ -1387,5 +1418,9 @@ async fn forwarded_for_is_sent_when_configured() {
         .await
         .unwrap();
 
+    // The header must actually reach the wire, not just the client's header map:
+    // the session GET above is the request that proves it was transmitted.
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].headers["Forwarded"], "for=203.0.113.7");
     assert_eq!(client.headers()["Forwarded"], "for=203.0.113.7");
 }

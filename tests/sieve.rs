@@ -354,7 +354,10 @@ async fn sieve_script_create_reports_already_exists() {
     let client = sieve_client(&server).await;
     mount_upload(&server, UPLOADED_BLOB_ID).await;
     // draft §2.2: a name clash is an `alreadyExists` SetError carrying the
-    // `existingId` of the script that already owns the name.
+    // `existingId` of the script that already owns the name. The fixture sends
+    // that RFC-required member so the test also pins how the client handles it:
+    // `existingId` is not modelled anywhere in `src/`, so it must be tolerated
+    // and dropped rather than breaking the parse.
     mount_one(
         &server,
         "SieveScript/set",
@@ -366,7 +369,8 @@ async fn sieve_script_create_reports_already_exists() {
                 "c0": {
                     "type": "alreadyExists",
                     "description": "A script with that name already exists",
-                    "properties": ["name"]
+                    "properties": ["name"],
+                    "existingId": "script-already-there"
                 }
             }
         }),
@@ -383,6 +387,9 @@ async fn sieve_script_create_reports_already_exists() {
     };
     assert_eq!(err.error(), &SetErrorType::AlreadyExists);
     assert_eq!(err.properties().unwrap(), ["name"]);
+    // The compliant `existingId` member is accepted by the parser but not
+    // surfaced by the client (no accessor exists for it in `src/`).
+    assert_eq!(err.description(), Some("A script with that name already exists"));
 }
 
 // ---------------------------------------------------------------------------
@@ -538,9 +545,14 @@ async fn sieve_script_deactivate_sends_the_deactivation_argument() {
     client.sieve_script_deactivate().await.unwrap();
 
     let args = only_call(&server).await;
-    // NOTE: draft §2.2 spells "deactivate" as `onSuccessActivateScript: null`;
-    // the crate sends its own `onSuccessDeactivateScript: true` member instead
-    // (recorded as a Finding).
+    // KNOWN CLIENT BUG (characterisation, not an endorsement): draft §2.2 has no
+    // `onSuccessDeactivateScript` member at all. It spells deactivation as
+    // `onSuccessActivateScript: Id|null`, where null means "deactivate the
+    // currently active script". The crate invents `onSuccessDeactivateScript:
+    // true` and never sends the draft member, so a spec-compliant server would
+    // ignore the invented field and leave the script active. This test pins the
+    // current wire shape so a change is deliberate; fixing the client means
+    // flipping both assertions below. Recorded in COVERAGE_PLAN.md.
     assert_eq!(args["onSuccessDeactivateScript"], true);
     assert!(args.get("onSuccessActivateScript").is_none(), "{args}");
 }

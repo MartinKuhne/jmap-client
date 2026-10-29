@@ -658,7 +658,8 @@ async fn email_set_keyword_uses_the_keywords_dotted_patch_key() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
 
-    // RFC 8621 §10.4/§10.5/§10.6 register `$seen`, `$flagged` and `$draft`.
+    // RFC 8621 §10.4.1/§10.4.2/§10.4.3 register `$draft`, `$seen` and
+    // `$flagged`.
     // The crate exposes no dedicated seen/flagged/draft helpers — the keyword is
     // passed through verbatim, which is what the RFC requires.
     for (keyword, set) in [("$seen", true), ("$flagged", false), ("$draft", true)] {
@@ -666,15 +667,15 @@ async fn email_set_keyword_uses_the_keywords_dotted_patch_key() {
         client.email_set_keyword("e1", keyword, set).await.unwrap();
 
         let bodies = jmap_request_bodies(&server).await;
+        assert_eq!(bodies.len(), 1, "exactly one JMAP call per iteration");
         let last = bodies.last().unwrap();
         assert_eq!(
             last["methodCalls"][0][1]["update"],
             json!({ "e1": { format!("keywords/{keyword}"): set } })
         );
+        // Clear the recording so the next iteration's `bodies.last()` and the
+        // length check above stay unambiguous.
         server.reset().await;
-        mount_one(&server, "Email/set", email_updated_body("e1")).await;
-        server.reset().await;
-        let _ = last;
     }
 }
 

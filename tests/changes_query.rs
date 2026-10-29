@@ -1047,7 +1047,7 @@ async fn query_changes_calculate_total_is_always_on_the_wire() {
     .await;
 
     // calculate_total is never called here.
-    mailbox_query_changes(&client, "old-state").await.unwrap();
+    let response = mailbox_query_changes(&client, "old-state").await.unwrap();
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(call[0], "Mailbox/queryChanges");
@@ -1059,12 +1059,12 @@ async fn query_changes_calculate_total_is_always_on_the_wire() {
     // maxChanges / upToId are Options and stay off the wire when unset.
     assert!(call[1].get("maxChanges").is_none());
     assert!(call[1].get("upToId").is_none());
-    // And the response carries no `total` because none was requested.
-    assert_eq!(
-        query_changes_body(ACCOUNT_ID, "a", "b", Value::Null, &[], json!([]))
-            .get("total"),
-        None
-    );
+    // And the *parsed client response* carries no `total`, because none was
+    // requested. Asserting on the fixture builder here would prove nothing about
+    // the client; this checks the deserialised value instead.
+    assert_eq!(response.total(), None);
+    assert_eq!(response.old_query_state(), "old-state");
+    assert_eq!(response.new_query_state(), "new-state");
 }
 
 #[tokio::test]

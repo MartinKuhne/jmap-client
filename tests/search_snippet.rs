@@ -513,8 +513,12 @@ async fn search_snippet_get_rejects_a_malformed_list() {
         .search_snippet_get(None::<SnippetFilter>, ["M1"])
         .await
         .unwrap_err();
+    // The mock answered with a well-formed *success* invocation whose list
+    // entry carries a non-string `subject`, so the only failure this fixture can
+    // produce is deserialising the payload. Pin that exact variant: accepting
+    // `Error::Method` too would let a regression pass as "some error happened".
     assert!(
-        matches!(err, Error::Parse(_) | Error::Method(_)),
+        matches!(err, Error::Parse(_)),
         "expected a parse failure, got {err:?}"
     );
 }

@@ -574,9 +574,10 @@ fn push_subscription_property_wire_names() {
 }
 
 #[test]
-fn a_push_subscription_carries_only_the_seven_rfc_members() {
-    // RFC 8620 §7.2 lists exactly these seven properties; nothing else may
-    // leak into the create/update patch.
+fn a_push_subscription_patch_carries_only_the_six_patch_members() {
+    // RFC 8620 §7.2 lists seven properties, but `id` is a server-assigned
+    // member that a create/update patch must never carry; the crate correctly
+    // omits it in `Set` position. Nothing else may leak into the patch.
     let mut sub: PushSubscription<jmap_client::Set> = PushSubscription::new(None);
     sub.device_client_id("d")
         .url("https://x")

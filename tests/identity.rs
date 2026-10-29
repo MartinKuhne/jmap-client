@@ -22,10 +22,13 @@
 //! * The `Identity` object has no `sortOrder`, `draftId` or `queueId` members;
 //!   RFC 8621 §6 defines exactly
 //!   `id/name/email/replyTo/bcc/textSignature/htmlSignature/mayDelete`.
-//! * `Request::{get,set,changes}_identity` add **no** capability of their own:
-//!   RFC 8621 §1.3.4 puts Identity under `urn:ietf:params:jmap:mail`, so a
-//!   mail-only session is enough (see
-//!   [`identity_methods_need_only_the_mail_capability`]).
+//! * `Request::{get,set,changes}_identity` add **no** capability of their own.
+//!   RFC 8621 §1.3.2 places the Identity data type under
+//!   `urn:ietf:params:jmap:submission` (there is no §1.3.4). The client does not
+//!   opt in per method: `Request::new` builds `using` from every capability the
+//!   *session* advertises, so an Identity call carries `submission` whenever the
+//!   server offers it and never advertises a capability the server withheld. See
+//!   [`identity_using_is_filtered_to_the_session_capabilities`].
 
 mod common;
 
@@ -841,11 +844,17 @@ async fn identity_changes_reports_cannot_calculate_changes() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn identity_methods_need_only_the_mail_capability() {
+async fn identity_using_is_filtered_to_the_session_capabilities() {
     let server = MockServer::start().await;
-    // RFC 8621 §1.3.4: Identity lives under `urn:ietf:params:jmap:mail`;
-    // there is no separate identity capability. A session that advertises
-    // nothing else must still serve Identity/get, /set and /changes.
+    // What this proves: `Request::new` builds `using` by filtering a fixed
+    // candidate list against what the session advertises, so a client never
+    // opts in to a capability the server withheld (RFC 8620 §3.3).
+    //
+    // Note this is NOT a conformance claim about Identity: RFC 8621 §1.3.2
+    // puts Identity under `urn:ietf:params:jmap:submission`, so a strict server
+    // would reject Identity/get on this trimmed mail-only session with
+    // `accountNotSupportedByMethod`. The mock answers regardless; the assertion
+    // below is about `using` construction, not about server acceptance.
     let mut session = session_json(&server).await;
     let capabilities = session["capabilities"].as_object_mut().unwrap();
     capabilities.retain(|name, _| {
@@ -867,14 +876,14 @@ async fn identity_methods_need_only_the_mail_capability() {
         .identity_get("XD-3301-222-11_22AAz", None::<IdentityProps>)
         .await
         .unwrap()
-        .expect("the record must come back on a mail-only session");
+        .expect("the mock answers, so the record must parse");
     assert_eq!(identity.email(), Some("joe@example.com"));
 
     let call = single_jmap_request(&server).await;
     assert_eq!(
         call["using"],
         json!(["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"]),
-        "an Identity request must announce core + mail and nothing else"
+        "`using` must be exactly the session-advertised capabilities (plus core)"
     );
 }
 

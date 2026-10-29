@@ -20,8 +20,7 @@
 //! | [`jmap_response`] | `200 application/json` `{"methodResponses": […], "sessionState": "…"}` |
 //! | [`jmap_response_with_created_ids`] | the same, plus the optional `createdIds` member |
 //! | [`problem_response`] | an RFC 7807 `application/problem+json` error body |
-//! | [`mount_jmap`] / [`mount_jmap_scoped`] | answer `POST /jmap` with a template |
-//! | [`request_bodies`] / [`single_request_body`] | spy on every request the client sent |
+//! | [`mount_jmap`] | answer `POST /jmap` with a template |
 //! | [`jmap_request_bodies`] / [`single_jmap_request`] | spy on `POST /jmap` only |
 //! | [`expected_basic_auth`] | the `Authorization` header `Client` builds for Basic auth |
 //!
@@ -62,7 +61,7 @@
 use jmap_client::client::{Client, Credentials};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockGuard, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// The single account the fixtures serve (RFC 8621 §2.6 example account id).
 pub const ACCOUNT_ID: &str = "u33084183";
@@ -313,11 +312,6 @@ pub async fn mount_session_template(server: &MockServer, template: ResponseTempl
         .await
 }
 
-/// Mounts [`session_json_with_sieve`] on `GET /.well-known/jmap`.
-pub async fn mount_sieve_session(server: &MockServer) {
-    mount_session_json(server, session_json_with_sieve(server).await).await
-}
-
 /// Mounts the default Session and connects a client to `server`.
 ///
 /// Credentials are Basic `test@example.org` / `secret`.
@@ -380,49 +374,9 @@ pub async fn mount_jmap(server: &MockServer, template: ResponseTemplate) {
         .await
 }
 
-/// Answers `POST /jmap` with `template` until the returned guard is dropped.
-///
-/// Keep the guard bound (`let _guard = …`) for as long as the mock should answer;
-/// dropping it unmounts the mock and further `POST /jmap` calls get 404.
-pub async fn mount_jmap_scoped(server: &MockServer, template: ResponseTemplate) -> MockGuard {
-    Mock::given(method("POST"))
-        .and(path(API_PATH))
-        .respond_with(template)
-        .mount_as_scoped(server)
-        .await
-}
-
-/// The JSON bodies of every request the server recorded, in arrival order.
-///
-/// Panics if a recorded body is not valid JSON — every client request is.
-pub async fn request_bodies(server: &MockServer) -> Vec<Value> {
-    let requests = server.received_requests().await.unwrap();
-    requests
-        .iter()
-        .map(|r| {
-            r.body_json::<Value>()
-                .unwrap_or_else(|e| panic!("recorded request body is not JSON: {e}"))
-        })
-        .collect()
-}
-
-/// The body of the *only* request recorded so far.
-///
-/// Panics unless exactly one request was received, which makes a test that
-/// accidentally issued two fail loudly.
-pub async fn single_request_body(server: &MockServer) -> Value {
-    let bodies = request_bodies(server).await;
-    assert_eq!(
-        bodies.len(),
-        1,
-        "expected exactly one request against this server"
-    );
-    bodies.into_iter().next().unwrap()
-}
-
 /// The JSON bodies of every `POST /jmap` request recorded, in arrival order.
 ///
-/// Prefer this over [`request_bodies`] once the client has also fetched the
+/// Filtering to `POST /jmap` matters once the client has also fetched the
 /// Session resource: the `GET /.well-known/jmap` would otherwise shift the
 /// indices of the JMAP calls.
 pub async fn jmap_request_bodies(server: &MockServer) -> Vec<Value> {
