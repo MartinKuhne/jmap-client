@@ -11,6 +11,12 @@ keywords = ["jmap", "email", "mail", "e-mail"]
 categories = ["email"]
 readme = "README.md"
 resolver = "2"
+# The two push-stream tests drive the `mock-jmap` workspace member, which is
+# `publish = false` test infrastructure. Cargo normalises that path dev-dependency
+# away when packaging, so shipping these two files would publish integration tests
+# that cannot compile against the crates.io tarball. They remain in the repository
+# and run from a checkout; they are simply not part of the published package.
+exclude = ["tests/websocket.rs", "tests/event_source.rs"]
 
 [dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }

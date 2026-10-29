@@ -2203,3 +2203,131 @@ _Discovered writing the P11 in-crate unit tests against `core/query.rs`,
     trick: that one removes the *panic continuation*, this one removes
     the *match arm*.
 
+
+---
+
+## Independent PR review (2026-10-29)
+
+Three read-only review passes over the branch diff (75 files, +32,899/-0) using
+the PR-review protocol: (1) core/protocol integration tests + the shared fixture
+layer, (2) mail-domain + push-stream tests, (3) the `mock-jmap` oracle and the
+in-crate unit tests. Every finding was re-verified against the code by the
+orchestrator before anything was acted on; nothing was accepted on the reviewer's
+word alone.
+
+### Invariants verified mechanically
+
+* All 44 changed `src/` files are byte-identical to base plus a test-only
+  append. Every insertion sits inside a `#[cfg(test)] mod tests` block; three
+  files (`client.rs`, `event_source/mod.rs`, `event_source/parser.rs`)
+  appended inside a test module that already existed on base. **No production
+  code was modified anywhere in this branch.**
+* `cargo publish --dry-run` succeeds: the new `[workspace]` + `mock-jmap`
+  path dev-dependency do not break packaging.
+* `.github/workflows/rust.yml` triggers on `main` only, so this PR carries no
+  CI status. All gates were run locally.
+
+### Findings from the review
+
+117. **`query_changes_calculate_total_is_always_on_the_wire` asserted on its own
+    fixture builder, not on the client.** The response was discarded with
+    `.unwrap();` and the "response carries no `total`" check then called
+    `query_changes_body(...)` and inspected the value the test had just built.
+    It passed regardless of client behaviour. Fixed: the response is bound and
+    `response.total()` / `old_query_state()` / `new_query_state()` are
+    asserted on the parsed value.
+118. **`tests/identity.rs` cited "RFC 8621 §1.3.4", which does not exist, and
+    drew the wrong conclusion from it.** RFC 8621 §1.3.2 places Identity under
+    `urn:ietf:params:jmap:submission`, not under `mail`. The client does not
+    opt in per method at all: `Request::new` filters a fixed candidate list
+    against the session (`src/core/request.rs`), so `using` is determined by
+    the fixture rather than by the Identity code path. Fixed: the test is renamed
+    to `identity_using_is_filtered_to_the_session_capabilities`, the citation is
+    corrected, and the comment states plainly that a strict server would reject
+    Identity/get on a mail-only session with `accountNotSupportedByMethod`.
+119. **`sieve_script_deactivate` pins a client bug that the old comment
+    understated.** draft-ietf-jmap-sieve §2.2 has no `onSuccessDeactivateScript`
+    member; it spells deactivation as `onSuccessActivateScript: Id|null`. The
+    crate invents its own member and never sends the draft one, so a compliant
+    server would leave the script active. The assertions are unchanged (this is a
+    test-only PR) but the comment now says KNOWN CLIENT BUG and what the
+    consequence is, so the wire shape is not mistaken for the contract.
+120. **The sieve `alreadyExists` fixture omitted the RFC-required
+    `existingId`** while its own comment claimed the error carried it, so the
+    test passed against a non-compliant SetError. Fixed: the fixture now sends
+    `existingId` and the test pins that the client tolerates and drops it
+    (no accessor exists in `src/`).
+121. **The push-subscription `keys` round-trip certifies a non-conformant
+    exchange.** RFC 8620 §7.2.1 says a `PushSubscription/get` response MUST NOT
+    return `url`/`keys` and that a request explicitly asking for them MUST be
+    rejected with `forbidden`. The test requests `Property::Keys`, the mock
+    returns both, and the test asserts success. Left as-is (the base64 decode
+    assertions are worth having) but it is a client-permissiveness note, not a
+    conformance claim.
+122. **The shared session fixture is not RFC-shaped, and nothing showed it.**
+    RFC 8621 §1.3.1/§1.3.2 and draft-sieve §1.3.1 all make the *session-level*
+    mail/submission/sieve capability an empty object with the limits on the
+    account; the fixture duplicates the account object at session level so the
+    typed accessors have something to read. Added
+    `an_rfc_shaped_session_leaves_the_session_level_limit_accessors_empty`,
+    which feeds the compliant shape and pins the real consequence: the session
+    parses and still advertises the capability, but `mail_capabilities()` and
+    `submission_capabilities()` return `None` because `{}` is filed under
+    `Capabilities::Empty`. The interop gap is now visible instead of hidden.
+123. **`a_push_subscription_carries_only_the_seven_rfc_members` asserted six.**
+    Renamed to `..._carries_only_the_six_patch_members` with a comment explaining
+    that `id` is server-assigned and correctly absent from a Set patch.
+124. **The published tarball shipped integration tests that cannot compile.**
+    Cargo normalises the `mock-jmap` path dev-dependency out of the packaged
+    manifest, but `tests/websocket.rs` and `tests/event_source.rs` import
+    `mock_jmap`; a downstream `cargo test` on the `.crate` would fail to
+    resolve the crate. Fixed with `exclude = ["tests/websocket.rs",
+    "tests/event_source.rs"]`. Verified: package drops from 101 to 99 files, the
+    two files are gone, and no packaged test references `mock_jmap`.
+125. **Four dead helpers in the fixture layer** (`mount_sieve_session`,
+    `mount_jmap_scoped`, `request_bodies`, `single_request_body`) were kept
+    alive by `#![allow(dead_code)]`; `request_bodies` also panicked on any
+    non-JSON recorded body, which the session `GET` produces. Removed, with the
+    now-dangling intra-doc links and the unused `MockGuard` import cleaned up.
+126. **`search_snippet_get_rejects_a_malformed_list` accepted
+    `Error::Parse | Error::Method`** from a fixture that can only produce a
+    parse failure. Pinned to `Error::Parse`.
+127. **`mock-jmap` `accept_loop` retired the listener on any `accept()`
+    error.** A transient `EMFILE`/`ECONNABORTED` under parallel load would
+    silently hang every later connection until the test's own timeout. Now
+    retries with a bounded consecutive-failure counter before giving up.
+128. **`LAST_EVENT_ID` in `mock-jmap/tests/p2_streams.rs` was a thread-local
+    that was never cleared**; correctness was borrowed from libtest's
+    one-thread-per-test behaviour. `open_stream` now consumes it (`take()`),
+    so a resume token cannot leak into a later test.
+129. **The mock silently skipped non-string entries in `using`.** RFC 8620 §3.2
+    types it as `String[Id]` and §3.5 makes a malformed request a
+    `notRequest` problem; the oracle was more permissive than the spec at the
+    exact point a test would want it strict. Now returns `notRequest`.
+130. **`forwarded_for_is_sent_when_configured` never checked the wire** - it
+    only read the client's internal header map despite the name. Now asserts the
+    header on the recorded request, matching the sibling bearer test.
+131. **`email_set_keyword_uses_the_keywords_dotted_patch_key` carried dead
+    copy-paste residue** (a `mount_one` immediately discarded by a second
+    `server.reset()`, and a `let _ = last;` no-op) and cited §10.4/§10.5/§10.6
+    for keyword registrations that live in §10.4.1-§10.4.3. Both cleaned up, plus
+    an explicit `bodies.len() == 1` invariant.
+
+### Accepted, not fixed
+
+* `tests/websocket.rs` proves a push was *not* delivered using a fixed 300 ms
+  quiet window rather than a causal barrier. The failure mode is one-directional
+  (false pass, never false failure) and the file already has the right primitive
+  (`sync()`); noted as a known limitation rather than reworked.
+* `src/client.rs::test_deserialize` is vacuous (binds to `_r` and asserts
+  nothing) but it is **pre-existing on base**, outside this PR's diff, so it was
+  left alone.
+* The `mock-jmap` lib's five remaining clippy warnings are design-level lints
+  (complex type, arg count, large `Err` variant) in test infrastructure.
+
+### Post-review state
+
+`cargo test -p jmap-client` 613 passed / 0 failed (one test added);
+`cargo test -p mock-jmap` 81 passed / 0 failed; `cargo clippy --all-targets`
+clean in `src/` and in every `jmap-client` test file;
+`cargo publish --dry-run` green.
