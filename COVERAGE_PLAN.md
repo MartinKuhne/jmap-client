@@ -288,6 +288,10 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
   problem+json rejection but may close the socket before the body flushes.
   P7 depends on reliable WS handshake assertions — fix the mock to flush/await
   the write before closing. Owner: P7 agent.
+  P6 re-measured it (Finding #77): 4 failures in 9 full-suite runs with the
+  P6 test files present, 2 in 5 with them stashed away — the same rate, and
+  the flake passes in isolation. It is purely a mock-side race; no client
+  test increment moves it.
 
 ### P4 — Integration tests: mail domain  ✅
 - [x] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
@@ -376,12 +380,78 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
       * `Property` Display.
 - [x] Verify + commit — P5 closed by this increment (67 new tests green).
 
-### P6 — Integration tests: sieve / principal / push / blob  ⬜
-- [ ] tests/sieve.rs (get/set/query/validate + script blob flow)
-- [ ] tests/principal.rs
-- [ ] tests/push_subscription.rs
-- [ ] tests/blob.rs (upload/download/copy through client API)
-- [ ] Verify + commit
+### P6 — Integration tests: sieve / principal / push / blob  ✅
+- [x] tests/sieve.rs — **22 tests**, wiremock-backed:
+      `Client::sieve_script_{get,create,replace,rename,activate,deactivate,
+      destroy,query,validate}` plus the `Request::{get,set,query}_sieve_script`
+      builders and `unwrap_{get,set,query}_sieve_script`.
+      * Get: draft-ietf-jmap-sieve-12 §2.1.1 record round-trip (`name`,
+        `isActive`, `blobId`), property subset, `notFound` → `None`, the
+        Finding-#48 `take_list().pop()` trap.
+      * Create/replace: the two-leg flow — script text uploaded to
+        `/upload/{ACCOUNT_ID}`, then `SieveScript/set` with the returned
+        `blobId`; `onSuccessActivateScript` present and absent; `replace`
+        re-activating by the *real* script id; the upload leg failing
+        aborts the whole helper before any JMAP call is made.
+      * Activate/deactivate/rename/destroy: single-member patches, the
+        `alreadyExists` / `invalidProperties` / `forbidden` SetError paths,
+        `notDestroyed`, `ifInState` mismatch.
+      * Validate: `SieveScript/validate` round-trip with `errAtLine`,
+        `errAtColumn`, `errDescription`, and the ok-answer shape.
+      * Query: filter + sort round-trip, omitted members with no criteria.
+      * Wire names: every `SieveScriptProperty` Display/serde pair.
+      Note: the box said "get/set/query/validate + script blob flow" — all
+      four method families plus the upload leg are covered. `SieveScript`
+      has no `order` member (Finding #68).
+- [x] tests/principal.rs — **25 tests**, wiremock-backed:
+      `Client::principal_{get,query,changes,destroy}` plus the five create
+      helpers `individual_create` / `domain_create` / `domain_enable_dkim` /
+      `list_create` / `group_create`, the seven patch helpers
+      `principal_set_{name,secret,email,timezone,members,aliases,
+      capabilities}`, and `Request::{get,set,query,query_changes,changes}
+      _principal`.
+      * Get: RFC 9670 §4.1 record round-trip, `isPersonal`/`isGroup`,
+        `Type`/`ACL`/`Property` wire names, property subset, `notFound` →
+        `None`, the `pop()` trap.
+      * Create: minimal individual patch, `alreadyExists`, DKIM enable
+        patching `secret` + `dkim` together, explicit `dkimExpiration:
+        null`, list and group creates carrying `members`.
+      * Set: each of the seven single-property patch helpers, `notUpdated`
+        with `invalidProperties`, `ifInState`, destroy + `notDestroyed`.
+      * Query: AND filter with every `PrincipalFilter` variant on the wire,
+        sort, window args, omitted filter/sort.
+      * Changes: created/updated/destroyed round-trip (§4.5) and
+        `cannotCalculateChanges`.
+- [x] tests/push_subscription.rs — **15 tests**, wiremock-backed:
+      `Client::push_subscription_{get,create,verify,update_types,destroy}`
+      plus `Request::{get,set}_push_subscription`.
+      * Get: the RFC 8620 §7.2.1 example list, `types` per subscription,
+        and the `Keys` `{p256-dh, as128gcm}` members decoded from URL-safe
+        base64.
+      * Create: the §7.2.3 example create with `onSuccessEnable`/`verify`,
+        keys encoded with the URL-safe alphabet, and a rejected create
+        (`tooManySubscriptions` / `invalidProperties`).
+      * Verify: patching `verificationCode`, and the wrong-code rejection.
+      * Update: `update_types` sending the type list, `update_types(.., None)`
+        asking for every type.
+      * Destroy: removal and `notDestroyed`.
+      * Wire names: `PushSubscriptionProperty` Display/serde pairs, and the
+        seven-member object shape pinned.
+- [x] tests/blob.rs — **12 tests**, wiremock-backed:
+      `Client::{upload,download,blob_copy}` plus `Request::copy_blob` and
+      `CopyBlobResponse::{copied,not_copied}`. Routes are mounted on the
+      blob endpoints (`/upload/{ACCOUNT_ID}`,
+      `/download/{ACCOUNT_ID}/{blobId}/none?accept=…`), not `POST /jmap`.
+      * Upload: metadata returned (`blobId`, `type`, `size`), the raw
+        octets arriving byte-identical (Finding #7), the `Content-Type`
+        actually sent, and an upload rejection surfacing as `Error::Http`.
+      * Download: bytes round-trip, `application/octet-stream` accept
+        header, a 404 blob.
+      * Copy: `copied` map round-trip (`oldBlobId` → new `blobId`),
+        `notCopied` with `notFound`, an id the server never reported being
+        an internal error, and a multi-blob copy through the `Request::`
+        builder.
+- [x] Verify + commit — P6 closed by this increment (74 new tests green).
 
 ### P7 — Integration tests: push streams  ⬜
 - [ ] tests/event_source.rs (stream consumption, types filter, closeafter,
@@ -414,6 +484,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 4 | 2026-10-28 | P3 (part 2): `tests/changes_query.rs` — 23 changes/query/queryChanges tests (Mailbox+Email+Thread changes round-trips and RFC §5.2 paging, `updatedProperties`, Mailbox/Email query filter+Comparator+collation+window, Mailbox/Email queryChanges with `AddedItem`, `cannotCalculateChanges`/`tooManyChanges`/`unsupportedSort`/`unsupportedFilter`, `canCalculateChanges=false`, and the lib.rs-doc-example + RFC 8621 §2.6/§4.10 result-reference chains) | **22.26%** lines (6953 instr., 1548 covered) — **+5.59 pp / +389 lines** over P3 part 1's 16.67% | **60 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only 7 warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `core/changes.rs` and `core/query_changes.rs` went from 0.00% to ~94%/~94%; `core/query.rs` 25.53% → 71.63%. P3 is now closed. New contract facts recorded as Findings 33–38. |
 | 5 | 2026-10-28 | P4: mail-domain wiremock integration tests — `tests/mailbox.rs` (26), `tests/email.rs` (37), `tests/thread.rs` (11), `tests/search_snippet.rs` (11). Drives every `Client::mailbox_*` / `Client::email_*` / `Client::thread_get` / `Client::search_snippet_get` helper plus the matching `Request::` builders against RFC-verbatim 8621/8620 fixtures; each test owns its `MockServer` and asserts the method name went on the wire. | **46.31%** lines (6953 instr., 3220 covered) — **+24.05 pp / +1672 lines** over P3's 22.26% | **145 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `mailbox/helpers.rs`, `thread/{get,helpers,mod}.rs` and `email/search_snippet.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 39–52. |
 | 6 | 2026-10-28 | P5: submission / identity / vacation wiremock integration tests — `tests/email_submission.rs` (27), `tests/identity.rs` (22), `tests/vacation_response.rs` (18). Drives every `Client::email_submission_*` / `Client::identity_*` / `Client::vacation_response_*` helper plus the matching `Request::` builders and `unwrap_*` accessors against RFC-verbatim 8621 §6/§7/§8 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **59.14%** lines (6953 instr., 4112 covered) — **+12.83 pp / +892 lines** over P4's 46.31% | **212 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green (212), `cargo test -p mock-jmap` green (80), `cargo clippy -p jmap-client --all-targets` clean for `tests/` (all 7 warnings are the pre-existing `mock-jmap` lib ones — none in `src/` or `tests/`), coverage summary lists only `src/` rows. All 13 target modules went from 0.00%; `email_submission/query.rs` and `vacation_response/get.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 53–65. |
+| 7 | 2026-10-29 | P6: sieve / principal / push_subscription / blob wiremock integration tests — `tests/principal.rs` (25), `tests/sieve.rs` (22), `tests/push_subscription.rs` (15), `tests/blob.rs` (12). Drives every `Client::sieve_script_*` / `Client::principal_*` / `Client::push_subscription_*` helper plus `Client::{upload,download,blob_copy}`, the matching `Request::` builders and `unwrap_*` accessors, against RFC 8620 §6.1–§6.3/§7.2, draft-ietf-jmap-sieve-12 §2 and RFC 9670 §4 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **75.64%** lines (6953 instr., 5259 covered) — **+16.50 pp / +1147 lines** over P5's 59.14% | **286 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 new) · mock-jmap 41 P2 + 35 P1 + 4 doctests pass, 1 known flake | Verified: `cargo test -p jmap-client` green (286), `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` lists only `src/` rows, `cargo test -p mock-jmap` green apart from the pre-existing WS-handshake flake of the P3-followup box (Finding #77). 18 of the 20 target modules went from 0.00%; `blob/copy.rs` and `sieve/validate.rs` reached 100%. No `src/` file was modified. Regions 56.93% → 73.14%, functions 57.85% → 73.97%. New contract facts recorded as Findings 66–77. The flake reproduces at the same rate with and without the P6 files (4/9 vs 2/5 full-suite runs), confirming it is independent of this increment. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -554,6 +625,58 @@ Still cold after P5 (P6/P7/P8 targets): `core/mod.rs`,
 `client_ws.rs`, and every
 `principal`/`push_subscription`/`sieve` module. `email/query.rs` (21.38%)
 and `lib.rs` (36.99%) are unchanged by this increment.
+
+#### P6 per-file line-coverage delta
+
+Against the state after P5 (`59.14%` / 4112 lines covered), re-measured with
+the four P6 files removed from `tests/`. Instrumented total unchanged at
+6953 lines.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `blob/copy.rs` | 0.00% | **100.00%** | +100.00 | 0 → 38 (+38) |
+| `blob/helpers.rs` | 0.00% | **100.00%** | +100.00 | 0 → 25 (+25) |
+| `sieve/validate.rs` | 0.00% | **100.00%** | +100.00 | 0 → 11 (+11) |
+| `blob/download.rs` | 0.00% | **97.67%** | +97.67 | 0 → 42 (+42) |
+| `principal/helpers.rs` | 0.00% | **96.12%** | +96.12 | 0 → 297 (+297) |
+| `push_subscription/helpers.rs` | 0.00% | **95.12%** | +95.12 | 0 → 78 (+78) |
+| `principal/mod.rs` | 0.00% | **93.75%** | +93.75 | 0 → 45 (+45) |
+| `principal/query.rs` | 0.00% | **93.75%** | +93.75 | 0 → 45 (+45) |
+| `principal/get.rs` | 0.00% | **93.33%** | +93.33 | 0 → 42 (+42) |
+| `sieve/helpers.rs` | 0.00% | **91.05%** | +91.05 | 0 → 173 (+173) |
+| `push_subscription/set.rs` | 0.00% | **90.57%** | +90.57 | 0 → 48 (+48) |
+| `push_subscription/get.rs` | 0.00% | **90.32%** | +90.32 | 0 → 28 (+28) |
+| `sieve/set.rs` | 0.00% | **87.18%** | +87.18 | 0 → 34 (+34) |
+| `push_subscription/mod.rs` | 0.00% | **81.25%** | +81.25 | 0 → 13 (+13) |
+| `sieve/get.rs` | 0.00% | **80.00%** | +80.00 | 0 → 12 (+12) |
+| `sieve/query.rs` | 0.00% | **78.57%** | +78.57 | 0 → 11 (+11) |
+| `sieve/mod.rs` | 0.00% | **76.92%** | +76.92 | 0 → 10 (+10) |
+| `principal/set.rs` | 0.00% | **68.75%** | +68.75 | 0 → 77 (+77) |
+| `blob/upload.rs` | 75.00% | **98.21%** | +23.21 | 42 → 55 (+13) |
+| `core/request.rs` | 76.28% | **92.02%** | +15.75 | 373 → 450 (+77) |
+| `core/query.rs` | 77.30% | **82.98%** | +5.67 | 109 → 117 (+8) |
+| `core/set.rs` | 65.17% | **70.41%** | +5.24 | 174 → 188 (+14) |
+| `core/get.rs` | 74.32% | **78.38%** | +4.05 | 55 → 58 (+3) |
+| `client.rs` | 82.21% | **83.13%** | +0.92 | 268 → 271 (+3) |
+| **TOTAL** | **59.14%** | **75.64%** | **+16.50** | **4112 → 5259 (+1147)** |
+
+Of the +1147 lines, 1042 are the twenty P6 target modules (19 of 20 moved;
+`blob/mod.rs` was already at 87.50%) and 105 are shared plumbing
+(`core/request.rs` method-call/params glue for the new method names,
+`core/set.rs` `SetRequest` create/update/destroy + `ifInState`,
+`core/{get,query}.rs` request builders, `client.rs` upload/download/copy
+dispatch).
+
+Regions moved 56.93% → 73.14% and functions 57.85% → 73.97% over the same
+increment.
+
+Still cold after P6 (P7/P8/P9 targets): `client_ws.rs` (0.00%),
+`event_source/{mod,stream}.rs`, `core/mod.rs`, `core/response.rs` (27.27%,
+mostly the `unwrap_*` accessors of domains no test batch-drives),
+`core/copy.rs` (61.84%), `core/error.rs` (47.50%), `lib.rs` (36.99%) and
+`email/query.rs`. The 80% goal is within reach of P7 alone: `client_ws.rs`
+(192 lines) plus `event_source/*` are the largest single untouched block
+left.
 
 ## Findings log
 
@@ -942,3 +1065,99 @@ _Discovered writing the P5 submission/identity/vacation wiremock tests._
     *not* the generic RFC 8620 §5.3 "`null` clears the property" form, which
     these setters cannot produce. `mailbox_ids([])` sends an empty map
     instead of a removal patch.
+
+_Discovered writing the P6 sieve/principal/push_subscription/blob wiremock
+tests._
+
+66. **`PushSubscription/get` fixtures must carry a `state` the RFC forbids.**
+    The generic `GetResponse<T>` declares `state: String` with no default,
+    but RFC 8620 §7.2.1: "It also does *not* return a `state` argument."
+    A response copied verbatim from the RFC fails with
+    `missing field "state"`, so the fixtures add `"state": "u1"` and say
+    why. Only Push is affected — `SieveScript/get` and every mail-domain
+    `/get` do define `state`, so their examples parse untouched.
+67. **`Principal.acl` rides as `"acl"`, not RFC 9670 §4's `shareWith` —
+    and the property name disagrees with the field.** `PrincipalProperty::
+    ShareWith` serialises/`Display`s as `"shareWith"`, so a property-subset
+    request asks the server for `shareWith`, but the response is parsed into
+    the field named `acl` (`src/principal/mod.rs:76`). Requesting the
+    property and reading the value therefore never connect: a server that
+    answers `{"shareWith": {...}}` leaves `Principal::acl()` empty. Fixtures
+    must use `"acl"`.
+68. **`SieveScript` has no `order` member.** draft-ietf-jmap-sieve-12 §2.1
+    defines the object as `{id, name, isActive, blobId}` (published as
+    RFC 9661 §2.1); ordering is implied by `isActive`, not stored. The P6
+    box's "set" list has no ordering knob, and
+    `sieve_script_record_has_no_order_member` pins the four-member shape so
+    a future `order` addition shows up as a test failure rather than a
+    silent fixture drift.
+69. **Time zone spelling: the crate says `timezone`, RFC 9670 says
+    `timeZone`.** `Principal::timezone` has no `#[serde(rename)]`, so it
+    reads and writes `"timezone"`; `PrincipalProperty::Timezone` renames to
+    `"timezone"` too. An RFC-conformant server sending `"timeZone"` is
+    silently ignored (unknown keys are dropped, not an error), and the same
+    request for property `"timezone"` is a member name the server does not
+    know. `principal_enum_wire_names` pins the crate's spelling.
+70. **`capabilities` is a flat `Vec<String>`; RFC 9670 §4 makes it a map.**
+    The RFC types it as `{ "<capability-uri>": { … } }` with per-capability
+    server data. The crate models `Option<Vec<String>>`, so any object the
+    server puts under a capability URI is lost. Fixtures use a JSON array.
+71. **`DKIM` members have `#[serde(rename)]` but no `skip_serializing_if`,
+    so `None` rides the wire as explicit `null`.**
+    `domain_enable_dkim("P1", "key-material", "sel1", None)` sends
+    `{"dkimSelector":"sel1","dkimExpiration":null}`. Unlike the
+    `string_not_set`-guarded `Principal` fields (Finding #39's mechanism),
+    there is no sentinel here: an absent expiration is indistinguishable
+    from a cleared one, and RFC 8620 §5.3 reads that `null` as "clear this
+    member".
+72. **`ACL`'s serde names carry a `may` prefix that `Display` drops, and one
+    variant changes meaning.** Wire `mayRename`/`mayDelete`/`mayShare`
+    versus Display `rename`/`delete`/`administer`; the variant is named
+    `Administer` while the wire key is `mayShare`
+    (`src/principal/mod.rs:132`). `format!("{}", ACL::Administer)` is
+    therefore *not* the JSON key for it — tests must compare against the
+    serde name when asserting the wire shape.
+73. **`DataType` is a closed enum with no `#[serde(other)]` catch-all.**
+    RFC 8620 §7.2.3's example pushes `"types": ["Todo"]`, which fails to
+    deserialise and takes down the whole `PushSubscription/get` parse. The
+    fixture substitutes `Mailbox` and keeps the rest of the RFC example.
+    Any server type outside the fifteen listed variants (Email … FileNode)
+    is unrepresentable.
+74. **`Client::sieve_script_deactivate()` sends
+    `onSuccessDeactivateScript: true`, a member the sieve draft never
+    defines.** draft-ietf-jmap-sieve-12 §2.2 spells deactivation as
+    `onSuccessActivateScript: null` on a `SieveScript/set`; there is no
+    `onSuccessDeactivateScript` in the draft or in RFC 9661. A
+    spec-following server ignores the unknown member, so the call silently
+    does nothing. `sieve_script_deactivate_sends_the_deactivation_argument`
+    pins what the crate actually sends so the divergence stays visible.
+75. **Sieve script uploads always go out as `application/octet-stream`,
+    never `application/sieve`.** All three helpers call
+    `self.upload(None, script, None)`
+    (`src/sieve/helpers.rs:37,64,168`), and `upload` falls back to
+    `content_type.unwrap_or("application/octet-stream")`
+    (`src/blob/upload.rs:76`). The draft §2.2.1 example uploads the script
+    with `Content-Type: application/sieve`; a push server or a strict
+    upload endpoint that sniffs the type will not see a sieve script.
+76. **No `Client::push_subscription_get` and no
+    `Client::principal_query_changes`.** Push subscriptions are not tied to
+    an account (RFC 8620 §7.2.1: "it does *not* take or return an
+    `accountId` argument"), so there is no `Client`-level read helper — the
+    get leg goes through `Request::get_push_subscription()` +
+    `send_get_push_subscription()`. Same shape for
+    `Principal/queryChanges`: `Request::query_principal_changes()` only.
+    Both are exercised at the `Request::` level in the P6 files.
+77. **The P3-followup `mock-jmap` WS-handshake flake is independent of the
+    client test files.**
+    `websocket_refuses_a_connection_that_offers_no_subprotocol`
+    (`mock-jmap/tests/p2_streams.rs:784`) fails intermittently with
+    `the rejection explains itself, got: ` (empty body): the mock writes the
+    rejection and closes, and the client's read sometimes wins the race.
+    Measured over full `cargo test -p mock-jmap` runs: **4 failures in 9
+    runs with the P6 files present, 2 in 5 with them stashed away** — the
+    same rate either way, and the P6 files live in a different crate and
+    never touch the mock. The single failing test passes when run on its own
+    (`--test p2_streams websocket_refuses` → 2 passed). Still open per the
+    P3-followup box; not fixed here because `mock-jmap/` is protected by
+    the content-protection rule. P7 must either fix the mock's flush or
+    tolerate this one test.
