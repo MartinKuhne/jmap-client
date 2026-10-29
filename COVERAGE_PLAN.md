@@ -103,9 +103,37 @@ Researched before committing further to the hand-rolled mock:
   `publish = false`, not consumable.
 - **saehrimnir** — binary-only fixture mock, JMAP read-path only, no WS.
 
-Decision: keep `mock-jmap` (workspace crate). It is the only option covering
-the client's full surface (all 38 Method-enum methods + WS + EventSource +
-blob + sieve draft + principals) with RFC semantics rather than canned JSON.
+### Coverage-surface analysis (2026-10-28)
+
+Exact instrumented totals (llvm-cov, default features): **6953 lines** in `src/`
+(80% = 5563 lines). Earlier "6.04%" figures were the Regions column; the Lines
+column baseline is 7.05%. Surface by transport:
+
+| Surface | Lines | wiremock-feasible |
+|---|---|---|
+| HTTP JMAP API (client, core, all 9 domain modules) | ~5990 | Yes — canned JSON + spying on request bodies |
+| Blob upload/download (HTTP) | 170 | Yes |
+| Pure logic (enums, errors, SSE parser, URL parsing) | ~270 | N/A — unit tests, no server |
+| EventSource stream (templating, headers, parse loop) | 77 | Mostly (static `text/event-stream` body; loses mid-stream error/keepalive timing) |
+| WebSocket (`client_ws.rs` + `send_ws` glue) | ~197 | **No — structurally impossible** |
+
+≈ 97% of lines are wiremock-testable; ~3% (WS) is not.
+
+### Mock strategy decision — HYBRID (user-approved 2026-10-28)
+
+- **P3–P6 (HTTP domains): `wiremock`** drives the client. Canned responses are
+  taken **verbatim from RFC 8620/8621 example payloads wherever available** so
+  the oracle is the RFC text, not our interpretation. Request shapes are
+  asserted with wiremock matchers/spying. Static pairs suffice for
+  result-refs/createdIds because the *client* only serializes references and
+  parses `createdIds` — resolution is server-side.
+- **P7 (push streams): `mock-jmap`** — the only wiremock-impossible surface
+  (WebSocket + live SSE). Its HTTP dispatch stays alive as the WS dispatcher.
+- **P8/P9: in-crate unit tests** for pure logic (no server involved).
+- Hand-rolled *trusted* mock surface shrinks from ~6k LoC to the WS/SSE
+  modules (~1k LoC, 80 self-tests).
+- Optional later risk-closer: differential smoke subset against a real
+  Stalwart server (Docker) to validate mock/RFC agreement.
 
 ## Phases
 
