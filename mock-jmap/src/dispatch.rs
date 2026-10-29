@@ -66,6 +66,59 @@ impl CallOutcome {
     }
 }
 
+/// A *request level* failure: the whole envelope was rejected, as opposed to a
+/// single method call answering an error.
+///
+/// Over HTTP this is the `application/problem+json` document of RFC 8620 §3.2;
+/// over the WebSocket it is the `RequestError` frame of RFC 8887 §4.4. Same
+/// semantics, two encodings — which is why [`dispatch_request`] reports it as
+/// this type instead of an [`HttpResponse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestProblem {
+    /// HTTP status the problem carries (`400` for the JMAP request errors).
+    pub status: u16,
+    /// Problem type URI, e.g. `urn:ietf:params:jmap:error:unknownCapability`.
+    pub problem_type: String,
+    /// Human readable summary.
+    pub title: String,
+    /// Optional detail.
+    pub detail: Option<String>,
+}
+
+impl RequestProblem {
+    pub fn new(status: u16, problem_type: &str, title: &str, detail: Option<String>) -> Self {
+        Self {
+            status,
+            problem_type: problem_type.to_string(),
+            title: title.to_string(),
+            detail,
+        }
+    }
+
+    /// The `application/problem+json` HTTP response (RFC 8620 §3.2).
+    pub fn to_response(&self) -> HttpResponse {
+        problem_response(
+            self.status,
+            &self.problem_type,
+            &self.title,
+            self.detail.as_deref(),
+        )
+    }
+
+    /// The `RequestError` WebSocket frame (RFC 8887 §4.4).
+    pub fn to_ws_frame(&self) -> Value {
+        let mut frame = Map::new();
+        frame.insert("@type".to_string(), json!("RequestError"));
+        frame.insert("type".to_string(), json!(&self.problem_type));
+        frame.insert("status".to_string(), json!(self.status));
+        frame.insert("title".to_string(), json!(&self.title));
+        if let Some(detail) = &self.detail {
+            frame.insert("detail".to_string(), json!(detail));
+        }
+        Value::Object(frame)
+    }
+}
+
 /// Handles `POST /jmap`.
 pub fn handle_jmap_post(shared: &mut Shared, req: &HttpRequest) -> HttpResponse {
     let root: Value = match serde_json::from_slice(&req.body) {
@@ -80,31 +133,59 @@ pub fn handle_jmap_post(shared: &mut Shared, req: &HttpRequest) -> HttpResponse 
         }
     };
 
+    match dispatch_request(shared, root) {
+        Ok(body) => HttpResponse::json(200, body),
+        Err(problem) => problem.to_response(),
+    }
+}
+
+/// Runs a JMAP request envelope and returns the response body.
+///
+/// Transport independent: `POST /jmap` (RFC 8620 §3.2) and the WebSocket
+/// `Request` frame (RFC 8887 §4.2) carry the same members, so both go through
+/// here and the WebSocket path never re-implements `using` validation, ordering,
+/// result references or `createdIds`.
+///
+/// On success the value is the response envelope:
+/// `{"methodResponses": [...], "sessionState": "..."}`, plus `createdIds` when
+/// something was created. A rejected envelope is a [`RequestProblem`], which the
+/// caller renders for its transport.
+pub fn dispatch_request(shared: &mut Shared, root: Value) -> Result<Value, RequestProblem> {
     let Some(root_obj) = root.as_object() else {
-        return problem_response(400, NOT_REQUEST, "Request is not a JSON object", None);
+        return Err(RequestProblem::new(
+            400,
+            NOT_REQUEST,
+            "Request is not a JSON object",
+            None,
+        ));
     };
 
     let Some(using) = root_obj.get("using").and_then(Value::as_array) else {
-        return problem_response(400, NOT_REQUEST, "Request has no \"using\" array", None);
+        return Err(RequestProblem::new(
+            400,
+            NOT_REQUEST,
+            "Request has no \"using\" array",
+            None,
+        ));
     };
     let Some(calls) = root_obj.get("methodCalls").and_then(Value::as_array) else {
-        return problem_response(
+        return Err(RequestProblem::new(
             400,
             NOT_REQUEST,
             "Request has no \"methodCalls\" array",
             None,
-        );
+        ));
     };
 
     let advertised = crate::session::advertised_capabilities();
     for capability in using.iter().filter_map(Value::as_str) {
         if !advertised.contains(&capability) {
-            return problem_response(
+            return Err(RequestProblem::new(
                 400,
                 UNKNOWN_CAPABILITY,
                 "Request advertises a capability the server does not support",
-                Some(capability),
-            );
+                Some(capability.to_string()),
+            ));
         }
     }
 
@@ -131,24 +212,24 @@ pub fn handle_jmap_post(shared: &mut Shared, req: &HttpRequest) -> HttpResponse 
     for call in calls {
         let Some(entry) = call.as_array() else {
             shared.method_errors = pending_method_errors;
-            return problem_response(
+            return Err(RequestProblem::new(
                 400,
                 NOT_REQUEST,
                 "methodCalls entries must be [name, args, callId] triples",
                 None,
-            );
+            ));
         };
         let name = entry.first().and_then(Value::as_str);
         let args = entry.get(1);
         let call_id = entry.get(2).and_then(Value::as_str);
         let (Some(name), Some(args), Some(call_id)) = (name, args, call_id) else {
             shared.method_errors = pending_method_errors;
-            return problem_response(
+            return Err(RequestProblem::new(
                 400,
                 NOT_REQUEST,
                 "methodCalls entries must be [name, args, callId] triples",
                 None,
-            );
+            ));
         };
 
         if let Some(injected) = take_method_error(&mut pending_method_errors, name) {
@@ -202,7 +283,7 @@ pub fn handle_jmap_post(shared: &mut Shared, req: &HttpRequest) -> HttpResponse 
             .insert("createdIds".to_string(), Value::Object(newly_created));
     }
 
-    HttpResponse::json(200, body)
+    Ok(body)
 }
 
 fn push_error(

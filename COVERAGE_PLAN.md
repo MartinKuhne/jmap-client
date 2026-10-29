@@ -136,17 +136,53 @@ Note: the blob upload/download endpoints (planned for P2) were delivered with P1
 because `Email/import` and `Blob/copy` are useless without a real upload path.
 P2 is therefore EventSource + WebSocket only.
 
-### P2 — Mock crate: blob + EventSource + WebSocket  ⬜
+### P2 — Mock crate: blob + EventSource + WebSocket  ✅
 - [x] Upload endpoint (RFC 8620 §5.1) incl. size/type edge cases — *done in P1*
 - [x] Download endpoint (RFC 8620 §5.2) incl. accept-type handling — *done in P1*
-- [ ] EventSource stream (chunked, multi-event, ping keepalives, Last-Event-ID)
-      — extension point ready: `http::HttpResponse::streaming()`; route currently
-      answers `501 notImplemented`
-- [ ] WebSocket (RFC 8887): handshake w/ `jmap` subprotocol, request/response
+- [x] EventSource stream (chunked, multi-event, ping keepalives, Last-Event-ID)
+      — `mock-jmap/src/eventsource.rs`. `GET /eventSource/…?types=&ping=&closeafter=`:
+      auth required (else 401 problem+json), 200 `text/event-stream`, chunked,
+      flushed per event, `id:` on every state change, `types` filter with `*`
+      meaning all, `ping` keepalive frames, `closeafter=state`, and
+      `Last-Event-ID` resume out of the push history.
+- [x] WebSocket (RFC 8887): handshake w/ `jmap` subprotocol, request/response
       correlation by requestId, push frames, RequestError frame, ping/pong
-      — `tokio-tungstenite 0.29` (handshake feature) is already a mock-jmap
-      dependency and compiles; `/ws` currently answers `501 notImplemented`
-- [ ] Orchestrator verifies + commit
+      — `mock-jmap/src/websocket.rs` on `tokio-tungstenite 0.29`. `methodCalls`
+      run through the *same* `dispatch::dispatch_request` as `POST /jmap`, so
+      the two transports cannot drift.
+- [x] Mock control API to drive pushes while streams are open — `PushBus` plus
+      `MockHandle::{push_event, trigger_state_change, broadcast_state_change,
+      mutate_from_elsewhere, push_email, push_email_of, push_subscriber_count,
+      last_push_id}` (see “Mock push API” below).
+- [x] Mock self-tests (streams answer raw bytes correctly) — 41 tests in
+      `mock-jmap/tests/p2_streams.rs`
+- [x] Orchestrator verifies + commit
+
+#### Mock push API (for P3+ / P7)
+
+Everything a test needs to make the mock “change state from elsewhere” while a
+stream is open, and the one ordering rule that makes it deterministic.
+
+| Call | Effect |
+|------|--------|
+| `handle().trigger_state_change("Mailbox", "10")` | publishes a `StateChange` for one data type of the primary account |
+| `handle().broadcast_state_change(BTreeMap<account, BTreeMap<type, state>>)` | publishes an arbitrary multi-account/multi-type `StateChange` |
+| `handle().mutate_from_elsewhere(\|store\| { …; vec!["Mailbox"] })` | runs a closure against the store, then publishes the returned types at their new state — what a real `*/set` does |
+| `handle().push_email(json)` / `push_email_of(id)` | publishes an `EmailPush` (of an existing fixture email) |
+| `handle().push_subscriber_count()` / `last_push_id()` | how many streams are attached; the current high-water event id |
+
+`pushState` **is** the push event id: a single monotonic counter in `PushBus`.
+So `Last-Event-ID: N` on SSE and `WebSocketPushEnable{pushState:"N"}` on WS
+resume from exactly the same point, and neither can replay a notification twice.
+
+**Ordering rule.** `WebSocketPushEnable`/`WebSocketPushDisable` get no reply of
+their own, so a push published straight after sending one can overtake it and be
+dropped before the session is switched on. Synchronise through the socket first:
+send any `Core/echo` request after the enable and wait for its `Response` — the
+socket is ordered, so the enable has been handled. `p2_streams.rs` wraps this as
+`enable_push(ws, dataTypes, pushState)` / `disable_push(ws)`; P7 should reuse the
+pattern. SSE needs no such handshake: the stream is live the moment the 200
+arrives, and `wait_for_subscribers(handle, n)` makes that observable.
 
 ### P3 — Integration tests: core  ⬜
 - [ ] tests/core_methods.rs: session fetch, multi-method requests, references,
@@ -200,6 +236,7 @@ P2 is therefore EventSource + WebSocket only.
 |---|------|--------|---------------|-------|-------|
 | 0 | 2026-10-28 | Baseline | 6.04% | 9 pass | pre-existing state |
 | 1 | 2026-10-28 | P1: `mock-jmap` workspace crate (HTTP core + session + full method registry + blob upload/download) | 6.04% (unchanged) | 9 client pass · 35 mock self-tests pass · 2 mock doctests pass | `cargo check -p mock-jmap`, `cargo test -p mock-jmap`, `cargo test -p jmap-client` all green. Coverage unchanged by design: P1 adds the mock, not client-facing tests; the mock crate is excluded from the metric. Deviations recorded below. |
+| 2 | 2026-10-28 | P2: `mock-jmap` EventSource (SSE) + RFC 8887 WebSocket legs, `PushBus` push model, mock control API for driving pushes against open streams | 6.04% (unchanged) | 9 client pass · 41 P2 stream tests pass · 35 P1 mock self-tests pass · 4 mock doctests pass | `cargo test -p mock-jmap`, `cargo test -p jmap-client`, `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` all green; the summary lists only `src/` rows. Coverage unchanged by design (P2 adds mock capability, not client-facing tests). Deviations recorded below. |
 
 ## Findings log
 
@@ -249,3 +286,61 @@ Discovered while building the mock against `src/` + the RFCs. None of these are
    (`os error 112`). Cleared `target/debug/incremental` (regenerable cache) to
    finish. If a later phase hits the same error, clear that directory again — it
    is build cache, not source.
+10. **A WebSocket frame with no `@type` is `notRequest`, not a close.** RFC 8887
+    §4.3.2 makes `@type` mandatory on every frame. The mock answers
+    `urn:ietf:params:jmap:error:notRequest` for a missing `@type` and for any
+    value other than `Request` / `WebSocketPushEnable` / `WebSocketPushDisable`,
+    and keeps the socket open.
+11. **A WebSocket frame that is not JSON is `notJSON`.** RFC 8887 §4.4 spells it
+    `urn:ietf:params:jmap:error:notJSON` (the same type as the HTTP problem in
+    finding 1), delivered as a `RequestError` *frame* — the connection survives
+    and answers the next request.
+12. **An unknown capability over WS is a frame, not a close.** `using` an
+    unregistered capability yields
+    `urn:ietf:params:jmap:error:unknownCapability` as a `RequestError` frame;
+    the same dispatcher that serves `POST /jmap` produces it, so HTTP and WS
+    cannot disagree.
+13. **`sessionState` is always present on a WS `Response`.** The RFC 8887 §4.4
+    example omits it, but RFC 8620 §3.4 requires it and
+    `jmap_client::WebSocketResponse` deserialises it as a non-optional `String`.
+14. **Binary WebSocket frames are ignored.** RFC 8887 §4.3.1 allows either
+    ignoring them or closing with 1003. The mock ignores, so a test can assert
+    the next *text* request still works rather than asserting a close code.
+15. **SSE event name is `StateChange`, not the RFC's `state`.** RFC 8620 §7.1
+    uses `event: state`, but `jmap_client`'s parser maps any name that is not
+    `ping` or `calendarAlert` to `EventType::State`, and the mock's own tests
+    read the name literally. `StateChange` / `EmailPush` are what the mock emits.
+16. **`EmailPush` over SSE breaks `jmap_client`.** `filter_notification()` in
+    `src/event_source/parser.rs` returns
+    `Error::Internal("Unexpected PushObject variant")` for anything that is not
+    `StateChange` or `CalendarAlert`. The mock still emits `EmailPush` over SSE
+    (it is RFC-correct); a P7 test that drives EmailPush through the *client's*
+    SSE parser will fail for this reason. Use the WebSocket leg for `EmailPush`
+    client assertions — it deserialises fine there.
+17. **No unconditional initial `StateChange` on SSE connect.** Some servers send
+    a hello state; the mock does not, because the client's parser dispatches an
+    event on the first blank line and would then try to parse an empty payload.
+    Instead the mock writes a liveness *comment*
+    (`: mock-jmap event stream open`) with no trailing blank line, so a test can
+    tell "connected" from "waiting" without a spurious event.
+18. **`closeafter=state` fires only on a real `StateChange`** — never on the
+    liveness comment and never on a `ping` keepalive.
+19. **`ping` accepts fractional seconds (floor 20 ms).** RFC 8620 §7.1 intends
+    an integer interval of at least 30 s. The mock accepts `ping=0.05` so a
+    keepalive test finishes in milliseconds. Real servers may reject it; nothing
+    in the client parses the value.
+20. **Two mock-local problem types for the WS handshake**, not RFC-registered:
+    `notWebSocketUpgrade` (a plain `GET /ws`) and `missingSubprotocol` (an
+    upgrade that does not offer `jmap`). Both are `application/problem+json`,
+    and both let a test assert the handshake was refused rather than upgraded.
+21. **`Collection::create()` does not advance the collection's state.** A test
+    that wants `state_str()` to move must call `record_change(created, updated,
+    destroyed)` the way a `*/set` handler does. `mutate_from_elsewhere` exists
+    precisely so tests do not have to remember this.
+22. **Push delivery needs a synchronisation frame.** `WebSocketPushEnable` gets
+    no reply, so a push published immediately after sending it can reach the
+    mock *before* the enable is processed and be filtered out forever. Three P2
+    tests were flaky until the test helper started sending a `Core/echo` after
+    enable/disable and waiting for its `Response`. P7 must use the same pattern
+    (see “Mock push API” above); `wait_for_subscribers()` alone is not enough,
+    because it proves the socket is attached, not that push is enabled.

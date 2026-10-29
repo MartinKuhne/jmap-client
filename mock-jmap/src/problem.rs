@@ -45,6 +45,15 @@ pub mod problem_type {
 
     /// Generic "resource does not exist" problem (client: `ProblemType::Other`).
     pub const NOT_FOUND: &str = "notFound";
+
+    /// RFC 8887 4.2: the upgrade must offer the `jmap` subprotocol. No URN is
+    /// registered for refusing a handshake, so the mock reports this bare
+    /// token with a 400 (client: `ProblemType::Other`).
+    pub const MISSING_SUBPROTOCOL: &str = "missingSubprotocol";
+
+    /// `GET /ws` without `Upgrade: websocket` — a plain request on the
+    /// WebSocket endpoint rather than a handshake.
+    pub const NOT_WEBSOCKET_UPGRADE: &str = "notWebSocketUpgrade";
 }
 
 /// Method-error types (RFC 8620 section 3.4 + RFC 8621 / draft-jmap-sieve).

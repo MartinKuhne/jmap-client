@@ -60,12 +60,16 @@
 #![forbid(unsafe_code)]
 
 pub mod dispatch;
+pub mod eventsource;
 pub mod handlers;
 pub mod http;
 pub mod problem;
+pub mod push;
 pub mod session;
 pub mod store;
+pub mod websocket;
 
+use std::collections::BTreeMap;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -76,9 +80,14 @@ use tokio::sync::Notify;
 
 use crate::http::{HttpRequest, HttpResponse};
 use crate::problem::problem_type::{
-    CANNOT_UPLOAD_BLOB, NOT_FOUND, NOT_IMPLEMENTED, UNAUTHORIZED,
+    CANNOT_UPLOAD_BLOB, NOT_FOUND, NOT_WEBSOCKET_UPGRADE, UNAUTHORIZED,
 };
 use crate::problem::problem_response;
+use crate::push::PushBus;
+
+/// The push notification types the mock emits, re-exported so tests can build
+/// them without reaching into the module.
+pub use crate::push::{Changed, PushEvent};
 use crate::session::{session_json, ACCOUNT_ID, MAX_SIZE_UPLOAD};
 use crate::store::Store;
 
@@ -134,6 +143,8 @@ pub struct Shared {
     pub max_size_upload: usize,
     /// Every request the mock has seen.
     pub log: Vec<RequestRecord>,
+    /// The fan-out bus behind EventSource and WebSocket push.
+    pub push: PushBus,
 }
 
 impl Shared {
@@ -258,6 +269,113 @@ impl MockHandle {
         f(&mut self.inner.lock().unwrap().store)
     }
 
+    /// Publishes `event` to every open EventSource stream and every
+    /// push-enabled WebSocket, and returns the id the bus assigned.
+    ///
+    /// This is the primitive the other push helpers are built on. Use it when a
+    /// test wants an exact payload:
+    ///
+    /// ```no_run
+    /// # use mock_jmap::{MockJmapServer, PushEvent};
+    /// let server = MockJmapServer::start();
+    /// let id = server.handle().push_event(PushEvent::state_change_one(
+    ///     "account1",
+    ///     "Mailbox",
+    ///     "42",
+    /// ));
+    /// assert_eq!(id, 1);
+    /// ```
+    pub fn push_event(&self, event: PushEvent) -> u64 {
+        self.inner.lock().unwrap().push.publish(event)
+    }
+
+    /// Pushes a `StateChange` for one data type of the fixture account.
+    ///
+    /// The state string is whatever the caller passes, so a test can assert on
+    /// the exact `changed` map without touching the store.
+    pub fn trigger_state_change(&self, data_type: &str, new_state: &str) -> u64 {
+        self.push_event(PushEvent::state_change_one(ACCOUNT_ID, data_type, new_state))
+    }
+
+    /// Pushes a `StateChange` for an explicit `accountId -> { type -> state }`
+    /// map (RFC 8620 §7.1).
+    pub fn broadcast_state_change(&self, changed: Changed) -> u64 {
+        self.push_event(PushEvent::state_change(changed))
+    }
+
+    /// Changes the store the way *another* user's client would, then tells every
+    /// open stream about it.
+    ///
+    /// `f` mutates the store and returns the JMAP type names it touched; the
+    /// mock advances the session state and publishes one `StateChange` carrying
+    /// each named collection's new state string. This is the `mejl-fake`
+    /// pattern: from the client's side of the wire the data moved on its own.
+    ///
+    /// ```no_run
+    /// # use mock_jmap::MockJmapServer;
+    /// let server = MockJmapServer::start();
+    /// server.handle().mutate_from_elsewhere(|store| {
+    ///     store.mailboxes.create(serde_json::json!({ "name": "From elsewhere" }));
+    ///     vec!["Mailbox".to_string()]
+    /// });
+    /// ```
+    pub fn mutate_from_elsewhere<F>(&self, f: F) -> u64
+    where
+        F: FnOnce(&mut Store) -> Vec<String>,
+    {
+        let mut guard = self.inner.lock().unwrap();
+        let touched = f(&mut guard.store);
+        guard.store.touch();
+
+        let mut inner: BTreeMap<String, String> = BTreeMap::new();
+        for data_type in touched {
+            if let Some(collection) = guard.store.collection(&data_type) {
+                inner.insert(data_type.clone(), collection.state_str());
+            }
+        }
+        let mut changed = Changed::new();
+        changed.insert(ACCOUNT_ID.to_string(), inner);
+        guard.push.publish(PushEvent::state_change(changed))
+    }
+
+    /// Pushes an `EmailPush` for the fixture account.
+    ///
+    /// `email` is the RFC 8621 §4.1.1 metadata a client uses to decide whether
+    /// to fetch the message. See the plan's Findings log before sending this
+    /// over an EventSource stream: `jmap_client`'s SSE parser only understands
+    /// `StateChange` and `CalendarAlert`, so `EmailPush` is a WebSocket-only
+    /// notification in practice.
+    pub fn push_email(&self, email: Value) -> u64 {
+        self.push_event(PushEvent::email_push(ACCOUNT_ID, email))
+    }
+
+    /// Delivers [`push_email`] with the metadata of a stored email.
+    pub fn push_email_of(&self, email_id: &str) -> Option<u64> {
+        let payload = {
+            let guard = self.inner.lock().unwrap();
+            guard
+                .store
+                .emails
+                .get(email_id)
+                .map(crate::push::email_push_payload)
+        };
+        payload.map(|email| self.push_email(email))
+    }
+
+    /// How many streams are attached to the bus right now.
+    ///
+    /// Every open EventSource counts, and so does every WebSocket from the
+    /// moment it upgrades — a socket that has not sent `WebSocketPushEnable`
+    /// still holds a receiver, it just drops what arrives.
+    pub fn push_subscriber_count(&self) -> usize {
+        self.inner.lock().unwrap().push.subscriber_count()
+    }
+
+    /// Id of the most recent push event, 0 if nothing has been pushed.
+    pub fn last_push_id(&self) -> u64 {
+        self.inner.lock().unwrap().push.last_id()
+    }
+
     /// Overrides the upload limit the mock enforces (see [`Shared::max_size_upload`]).
     pub fn set_max_size_upload(&self, bytes: usize) {
         self.inner.lock().unwrap().max_size_upload = bytes;
@@ -323,6 +441,7 @@ impl MockJmapServer {
             raw: Vec::new(),
             max_size_upload: MAX_SIZE_UPLOAD,
             log: Vec::new(),
+            push: PushBus::new(),
         }));
         let shutdown = Arc::new(Notify::new());
 
@@ -413,15 +532,35 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Mutex<Shared>>, shutdown
 
 async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Mutex<Shared>>) {
     let mut stream = stream;
-    let Ok(request) =
-        tokio::time::timeout(Duration::from_secs(60), http::read_request(&mut stream)).await
+    let Ok(raw) =
+        tokio::time::timeout(Duration::from_secs(60), http::read_request_raw(&mut stream)).await
     else {
         return;
     };
-    let Ok(Some(request)) = request else {
+    let Ok(Some(raw)) = raw else {
         return;
     };
 
+    // A WebSocket upgrade takes the socket over for good; nothing below may
+    // answer it with a plain HTTP response.
+    if raw.request.method == "GET"
+        && raw.request.path == "/ws"
+        && websocket::is_upgrade(&raw.request)
+    {
+        shared
+            .lock()
+            .expect("mock-jmap: shared state poisoned")
+            .log
+            .push(RequestRecord {
+                method: raw.request.method.clone(),
+                path: raw.request.path.clone(),
+                body: raw.request.body.clone(),
+            });
+        websocket::serve(shared, stream, raw).await;
+        return;
+    }
+
+    let request = raw.request;
     let response = {
         let mut guard = shared.lock().expect("mock-jmap: shared state poisoned");
         guard.log.push(RequestRecord {
@@ -431,6 +570,13 @@ async fn serve_connection(stream: tokio::net::TcpStream, shared: Arc<Mutex<Share
         });
         route(&mut guard, &request)
     };
+
+    // A streaming response is a routing decision, not a body: the EventSource
+    // leg owns the socket from here and keeps writing chunks.
+    if response.is_streaming() {
+        let _ = eventsource::serve(&shared, &mut stream, &request, &response.body).await;
+        return;
+    }
 
     let _ = http::write_response(&mut stream, &response).await;
 }
@@ -466,17 +612,15 @@ pub fn route(shared: &mut Shared, request: &HttpRequest) -> HttpResponse {
         ("POST", "/jmap") => dispatch::handle_jmap_post(shared, request),
         ("POST", path) if path.starts_with("/upload/") => handle_upload(shared, request),
         ("GET", path) if path.starts_with("/download/") => handle_download(shared, request),
-        ("GET", "/eventSource") | ("GET", "/eventSource/") => problem_response(
-            501,
-            NOT_IMPLEMENTED,
-            "EventSource is served by the P2 phase of mock-jmap",
-            None,
-        ),
+        ("GET", "/eventSource") | ("GET", "/eventSource/") => eventsource::route_marker(),
+        // A real upgrade never reaches this line: `serve_connection` hands the
+        // socket to [`websocket::serve`] first. Landing here means the client
+        // asked for `/ws` without upgrading.
         ("GET", "/ws") => problem_response(
-            501,
-            NOT_IMPLEMENTED,
-            "WebSocket is served by the P2 phase of mock-jmap",
-            None,
+            400,
+            NOT_WEBSOCKET_UPGRADE,
+            "Not a WebSocket upgrade request",
+            Some("Send `Upgrade: websocket` and `Connection: Upgrade` to open the JMAP WebSocket"),
         ),
         _ => problem_response(404, NOT_FOUND, "No such route", Some(&request.path)),
     }

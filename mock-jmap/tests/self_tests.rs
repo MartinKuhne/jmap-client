@@ -286,15 +286,28 @@ fn unknown_route_is_404() {
 }
 
 #[test]
-fn p2_routes_are_reserved_not_implemented() {
+fn p2_routes_are_live_now() {
     let server = MockJmapServer::start();
-    for path in ["/eventSource?types=Email", "/ws"] {
-        let (status, headers, body) = get(server.port(), path);
-        assert_eq!(status, 501, "{path} should be reserved for P2");
-        assert_eq!(headers["content-type"], "application/problem+json");
-        let doc: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(doc["type"], json!("notImplemented"));
-    }
+
+    // A plain GET on the WebSocket endpoint is not a handshake; the upgrade is
+    // intercepted before routing, so landing here means "you asked for /ws but
+    // did not upgrade".
+    let (status, headers, body) = get(server.port(), "/ws");
+    assert_eq!(status, 400);
+    assert_eq!(headers["content-type"], "application/problem+json");
+    let doc: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["type"], json!("notWebSocketUpgrade"));
+
+    // The EventSource route answers with a stream now, but it still requires
+    // authentication, and that failure is an ordinary problem document.
+    let (status, headers, body) = send(
+        server.port(),
+        &build_request("GET", "/eventSource?types=*", &[], b""),
+    );
+    assert_eq!(status, 401);
+    assert_eq!(headers["content-type"], "application/problem+json");
+    let doc: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(doc["type"], json!("unauthorized"));
 }
 
 // ---------------------------------------------------------------------------

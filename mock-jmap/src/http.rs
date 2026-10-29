@@ -17,8 +17,11 @@
 //!   body, by taking the raw socket out of the accept loop.
 
 use std::io;
+use std::io::Cursor;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 
 /// Hard cap on the head section (request line + headers).
@@ -74,6 +77,9 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
     /// Extra headers appended verbatim (`name, value`).
     pub extra_headers: Vec<(String, String)>,
+    /// `true` when the body is not the whole story: the caller keeps the socket
+    /// and streams more (EventSource).
+    pub streaming: bool,
 }
 
 impl HttpResponse {
@@ -84,6 +90,7 @@ impl HttpResponse {
             content_type: "application/json".to_string(),
             body: body.to_string().into_bytes(),
             extra_headers: Vec::new(),
+            streaming: false,
         }
     }
 
@@ -94,6 +101,7 @@ impl HttpResponse {
             content_type: content_type.into(),
             body,
             extra_headers: Vec::new(),
+            streaming: false,
         }
     }
 
@@ -108,7 +116,14 @@ impl HttpResponse {
             content_type: "text/event-stream".to_string(),
             body: first_chunk,
             extra_headers: vec![("Cache-Control".to_string(), "no-cache".to_string())],
+            streaming: true,
         }
+    }
+
+    /// `true` when this response is served by streaming chunks rather than a
+    /// fixed `Content-Length` body.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
     }
 }
 
@@ -117,6 +132,29 @@ impl HttpResponse {
 /// Returns `Ok(None)` when the peer closed the connection cleanly before sending
 /// anything, which the accept loop treats as "connection finished".
 pub async fn read_request(stream: &mut TcpStream) -> io::Result<Option<HttpRequest>> {
+    Ok(read_request_raw(stream).await?.map(|raw| raw.request))
+}
+
+/// A request together with the head bytes it arrived as.
+///
+/// The WebSocket upgrade needs this: the handshake is handed to
+/// `tokio_tungstenite`, which parses the request itself, so the bytes this
+/// module already read off the socket have to be replayed to it — see
+/// [`PrefixedStream`].
+#[derive(Debug, Clone)]
+pub struct RawRequest {
+    /// The parsed request.
+    pub request: HttpRequest,
+    /// Request line plus headers, terminating CRLF CRLF included.
+    pub head: Vec<u8>,
+    /// Bytes read past the end of the body. A client that pipelines (or a TCP
+    /// segment that simply arrives with the next frame attached) puts those bytes
+    /// here instead of losing them; the WebSocket upgrade replays them.
+    pub leftover: Vec<u8>,
+}
+
+/// Reads one request and keeps the raw head bytes (see [`RawRequest`]).
+pub async fn read_request_raw(stream: &mut TcpStream) -> io::Result<Option<RawRequest>> {
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut tmp = [0u8; 8192];
     let head_end = loop {
@@ -138,6 +176,8 @@ pub async fn read_request(stream: &mut TcpStream) -> io::Result<Option<HttpReque
         }
         buf.extend_from_slice(&tmp[..n]);
     };
+
+    let raw_head = buf[..head_end + 4].to_vec();
 
     let head = std::str::from_utf8(&buf[..head_end])
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "head is not utf-8"))?;
@@ -185,12 +225,18 @@ pub async fn read_request(stream: &mut TcpStream) -> io::Result<Option<HttpReque
         read_chunked_body(stream, &mut body).await?;
         let body = decode_chunked(&body)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad chunked body"))?;
-        return Ok(Some(HttpRequest {
-            method,
-            path,
-            query,
-            headers,
-            body,
+        return Ok(Some(RawRequest {
+            request: HttpRequest {
+                method,
+                path,
+                query,
+                headers,
+                body,
+            },
+            head: raw_head,
+            // The chunked reader stops exactly at the terminating zero-length
+            // chunk, so nothing is left over.
+            leftover: Vec::new(),
         }));
     }
 
@@ -214,14 +260,24 @@ pub async fn read_request(stream: &mut TcpStream) -> io::Result<Option<HttpReque
         }
         body.extend_from_slice(&tmp[..n]);
     }
+    let consumed = head_end + 4 + expected;
+    let leftover = if buf.len() > consumed {
+        buf[consumed..].to_vec()
+    } else {
+        Vec::new()
+    };
     body.truncate(expected);
 
-    Ok(Some(HttpRequest {
-        method,
-        path,
-        query,
-        headers,
-        body,
+    Ok(Some(RawRequest {
+        request: HttpRequest {
+            method,
+            path,
+            query,
+            headers,
+            body,
+        },
+        head: raw_head,
+        leftover,
     }))
 }
 
@@ -294,6 +350,149 @@ pub async fn write_response(stream: &mut TcpStream, response: &HttpResponse) -> 
     stream.flush().await?;
     let _ = stream.shutdown().await;
     Ok(())
+}
+
+/// Opens a `Transfer-Encoding: chunked` event stream on the socket.
+///
+/// No `Content-Length`: the body is an unbounded sequence of chunks, which is
+/// what lets an EventSource client see each notification as it happens instead
+/// of when the connection closes.
+pub async fn write_streaming_head(stream: &mut TcpStream) -> io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\n\
+               Content-Type: text/event-stream\r\n\
+               Cache-Control: no-cache\r\n\
+               Connection: keep-alive\r\n\
+               Transfer-Encoding: chunked\r\n\
+               \r\n",
+        )
+        .await
+}
+
+/// Writes one chunk and flushes it.
+///
+/// The flush is the point of this function: without it a notification could sit
+/// in the socket buffer until the next one arrives, and a client waiting for
+/// `closeafter=state` would wait forever.
+pub async fn write_chunk(stream: &mut TcpStream, bytes: &[u8]) -> io::Result<()> {
+    stream
+        .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+        .await?;
+    stream.write_all(bytes).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.flush().await
+}
+
+/// Terminates the chunked stream (a zero-length chunk).
+pub async fn finish_stream(stream: &mut TcpStream) -> io::Result<()> {
+    stream.write_all(b"0\r\n\r\n").await?;
+    stream.flush().await
+}
+
+/// Splits a query string into percent-decoded key/value pairs.
+///
+/// Order is preserved and no decoding of `+` is attempted: the mock only needs
+/// the literal RFC 8620 §7.3 parameters (`types`, `closeafter`, `ping`).
+pub fn parse_query(query: &str) -> Vec<(String, String)> {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (
+                percent_decode(key),
+                percent_decode(value),
+            )
+        })
+        .collect()
+}
+
+/// Decodes `%XX` escapes; leaves everything else alone.
+pub fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &bytes[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(hex).unwrap_or(""), 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+}
+
+/// Replays a buffer of already-read bytes, then delegates to the wrapped socket.
+///
+/// The WebSocket upgrade is the reason this exists: [`read_request_raw`] has
+/// already consumed the handshake off the socket, but `tokio_tungstenite` wants
+/// to parse it itself. Wrapping the socket so the head comes back first makes the
+/// upgrade deterministic — no peeking, no busy waiting, no guessing at how much
+/// of the handshake a given read happened to deliver.
+#[derive(Debug)]
+pub struct PrefixedStream<S> {
+    prefix: Cursor<Vec<u8>>,
+    inner: S,
+}
+
+impl<S> PrefixedStream<S> {
+    pub fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix: Cursor::new(prefix),
+            inner,
+        }
+    }
+
+    /// The wrapped socket.
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for PrefixedStream<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let start = this.prefix.position() as usize;
+        let remaining = this.prefix.get_ref().len().saturating_sub(start);
+        if remaining > 0 {
+            let take = remaining.min(buf.remaining());
+            if take > 0 {
+                let chunk = this.prefix.get_ref()[start..start + take].to_vec();
+                this.prefix.set_position((start + take) as u64);
+                buf.put_slice(&chunk);
+            }
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }
 
 fn reason_phrase(status: u16) -> &'static str {
