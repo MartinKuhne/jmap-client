@@ -11,7 +11,7 @@
 
 use std::fmt::Display;
 
-use serde::Deserialize;
+use serde::{de::Deserializer, Deserialize};
 
 #[derive(Debug, Deserialize)]
 pub struct ProblemDetails {
@@ -49,48 +49,95 @@ pub struct MethodError {
     pub p_type: MethodErrorType,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+/// The method-level error types the client models, plus a catch-all for the
+/// ones it does not.
+///
+/// RFC 8620 §3.6.2:
+///
+/// > Further general errors MAY be defined in future RFCs. Should a client
+/// > receive an error type it does not understand, it MUST treat it the same as
+/// > the `serverFail` type.
+///
+/// An unrecognised `type` is therefore *not* a deserialisation failure: it
+/// parses into [`MethodErrorType::Other`] carrying the string the server sent,
+/// so the error reaches the caller instead of being swallowed. Call
+/// [`MethodErrorType::is_server_fail_equivalent`] to honour the MUST without
+/// matching on every variant.
+///
+/// The wire spellings of the modelled variants are the string literals of the
+/// [`Deserialize`] impl below.
+#[derive(Debug, PartialEq, Eq)]
 pub enum MethodErrorType {
-    #[serde(rename = "serverUnavailable")]
     ServerUnavailable,
-    #[serde(rename = "serverFail")]
     ServerFail,
-    #[serde(rename = "serverPartialFail")]
     ServerPartialFail,
-    #[serde(rename = "unknownMethod")]
     UnknownMethod,
-    #[serde(rename = "invalidArguments")]
     InvalidArguments,
-    #[serde(rename = "invalidResultReference")]
     InvalidResultReference,
-    #[serde(rename = "forbidden")]
     Forbidden,
-    #[serde(rename = "accountNotFound")]
     AccountNotFound,
-    #[serde(rename = "accountNotSupportedByMethod")]
     AccountNotSupportedByMethod,
-    #[serde(rename = "accountReadOnly")]
     AccountReadOnly,
-    #[serde(rename = "requestTooLarge")]
     RequestTooLarge,
-    #[serde(rename = "cannotCalculateChanges")]
     CannotCalculateChanges,
-    #[serde(rename = "stateMismatch")]
     StateMismatch,
-    #[serde(rename = "alreadyExists")]
     AlreadyExists,
-    #[serde(rename = "fromAccountNotFound")]
     FromAccountNotFound,
-    #[serde(rename = "fromAccountNotSupportedByMethod")]
     FromAccountNotSupportedByMethod,
-    #[serde(rename = "anchorNotFound")]
     AnchorNotFound,
-    #[serde(rename = "unsupportedSort")]
     UnsupportedSort,
-    #[serde(rename = "unsupportedFilter")]
     UnsupportedFilter,
-    #[serde(rename = "tooManyChanges")]
     TooManyChanges,
+    /// An error type this client does not model — one defined in a future RFC,
+    /// or a vendor-specific one. RFC 8620 §3.6.2: it MUST be handled the same
+    /// as `serverFail`; see [`MethodErrorType::is_server_fail_equivalent`].
+    Other(String),
+}
+
+impl MethodErrorType {
+    /// RFC 8620 §3.6.2 — a client that receives an error type it does not
+    /// understand MUST treat it the same as `serverFail`. This is `true` for
+    /// [`MethodErrorType::ServerFail`] itself and for every
+    /// [`MethodErrorType::Other`], so a caller can implement the MUST without
+    /// enumerating the modelled variants.
+    pub fn is_server_fail_equivalent(&self) -> bool {
+        matches!(self, Self::ServerFail | Self::Other(_))
+    }
+}
+
+impl<'de> Deserialize<'de> for MethodErrorType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // RFC 8620 §3.6.2: an error type the client does not model must not
+        // fail deserialisation (that would lose the server's error), it must
+        // land in `Other` and be treated as `serverFail`.
+        let wire = String::deserialize(deserializer)?;
+        Ok(match wire.as_str() {
+            "serverUnavailable" => Self::ServerUnavailable,
+            "serverFail" => Self::ServerFail,
+            "serverPartialFail" => Self::ServerPartialFail,
+            "unknownMethod" => Self::UnknownMethod,
+            "invalidArguments" => Self::InvalidArguments,
+            "invalidResultReference" => Self::InvalidResultReference,
+            "forbidden" => Self::Forbidden,
+            "accountNotFound" => Self::AccountNotFound,
+            "accountNotSupportedByMethod" => Self::AccountNotSupportedByMethod,
+            "accountReadOnly" => Self::AccountReadOnly,
+            "requestTooLarge" => Self::RequestTooLarge,
+            "cannotCalculateChanges" => Self::CannotCalculateChanges,
+            "stateMismatch" => Self::StateMismatch,
+            "alreadyExists" => Self::AlreadyExists,
+            "fromAccountNotFound" => Self::FromAccountNotFound,
+            "fromAccountNotSupportedByMethod" => Self::FromAccountNotSupportedByMethod,
+            "anchorNotFound" => Self::AnchorNotFound,
+            "unsupportedSort" => Self::UnsupportedSort,
+            "unsupportedFilter" => Self::UnsupportedFilter,
+            "tooManyChanges" => Self::TooManyChanges,
+            other => Self::Other(other.to_string()),
+        })
+    }
 }
 
 impl ProblemDetails {
@@ -141,11 +188,18 @@ impl MethodError {
     pub fn error(&self) -> &MethodErrorType {
         &self.p_type
     }
+
+    /// RFC 8620 §3.6.2 — shorthand for
+    /// `self.error().is_server_fail_equivalent()`: does this error have to be
+    /// handled as if it were a `serverFail`?
+    pub fn is_server_fail_equivalent(&self) -> bool {
+        self.p_type.is_server_fail_equivalent()
+    }
 }
 
 impl Display for MethodError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.p_type {
+        match &self.p_type {
             MethodErrorType::ServerUnavailable => write!(f, "Server unavailable"),
             MethodErrorType::ServerFail => write!(f, "Server fail"),
             MethodErrorType::ServerPartialFail => write!(f, "Server partial fail"),
@@ -170,6 +224,13 @@ impl Display for MethodError {
             MethodErrorType::UnsupportedSort => write!(f, "Unsupported sort"),
             MethodErrorType::UnsupportedFilter => write!(f, "Unsupported filter"),
             MethodErrorType::TooManyChanges => write!(f, "Too many changes"),
+            // RFC 8620 §3.6.2: an unrecognised type is handled as `serverFail`,
+            // so it renders as one while keeping the string the server sent.
+            MethodErrorType::Other(other) => write!(
+                f,
+                "Unknown method error type {} (treated as server fail)",
+                other
+            ),
         }
     }
 }
@@ -402,7 +463,8 @@ mod tests {
     }
 
     /// RFC 8620 §3.6.2 (plus the RFC 8621 additions) — every method error
-    /// type has a distinct human readable rendering.
+    /// type has a distinct human readable rendering, and a type the client
+    /// does not model renders as the `serverFail` it MUST be treated as.
     #[test]
     fn every_method_error_type_renders_its_own_message() {
         let cases: Vec<(&str, &str)> = vec![
@@ -432,9 +494,18 @@ mod tests {
             ("unsupportedSort", "Unsupported sort"),
             ("unsupportedFilter", "Unsupported filter"),
             ("tooManyChanges", "Too many changes"),
+            (
+                "tooManySubscriptions",
+                "Unknown method error type tooManySubscriptions (treated as server fail)",
+            ),
         ];
 
-        assert_eq!(cases.len(), 20, "all twenty method error types");
+        assert_eq!(
+            cases.len(),
+            21,
+            "the twenty modelled method error types plus the unmodelled \
+             catch-all of RFC 8620 §3.6.2"
+        );
         for (rfc_type, message) in cases {
             let error: MethodError = serde_json::from_str(&format!(r#"{{"type":"{rfc_type}"}}"#))
                 .unwrap_or_else(|e| panic!("{rfc_type} must deserialise: {e}"));
@@ -458,5 +529,37 @@ mod tests {
             "RFC 8620 §5.2.2 cannotCalculateChanges"
         );
         assert_eq!(error.to_string(), "Cannot calculate changes");
+    }
+
+    /// RFC 8620 §3.6.2: *"Should a client receive an error type it does not
+    /// understand, it MUST treat it the same as the `serverFail` type."* That
+    /// starts with the type surviving deserialisation: an unmodelled type lands
+    /// in `Other` with the string intact instead of failing the parse.
+    #[test]
+    fn an_unmodelled_method_error_type_parses_into_the_catch_all() {
+        for wire in ["tooManySubscriptions", "urn:example:params:error:boom"] {
+            let error: MethodError = serde_json::from_str(&format!(r#"{{"type":"{wire}"}}"#))
+                .unwrap_or_else(|e| panic!("{wire} must deserialise: {e}"));
+            assert_eq!(
+                error.error(),
+                &MethodErrorType::Other(wire.to_string()),
+                "{wire} must land in the catch-all with the string the server sent"
+            );
+            assert!(
+                error.is_server_fail_equivalent(),
+                "{wire} must be handled as a serverFail"
+            );
+        }
+
+        let server_fail: MethodErrorType =
+            serde_json::from_str(r#""serverFail""#).expect("serverFail must deserialise");
+        assert!(
+            server_fail.is_server_fail_equivalent(),
+            "serverFail is of course its own equivalent"
+        );
+        assert!(
+            !MethodErrorType::AccountReadOnly.is_server_fail_equivalent(),
+            "a modelled type keeps its own semantics"
+        );
     }
 }

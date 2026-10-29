@@ -20,6 +20,7 @@
 //! | [`jmap_response`] | `200 application/json` `{"methodResponses": […], "sessionState": "…"}` |
 //! | [`jmap_response_with_created_ids`] | the same, plus the optional `createdIds` member |
 //! | [`problem_response`] | an RFC 7807 `application/problem+json` error body |
+//! | [`problem_response_with_charset`] | the same, with `; charset=utf-8` on the media type |
 //! | [`mount_jmap`] | answer `POST /jmap` with a template |
 //! | [`jmap_request_bodies`] / [`single_jmap_request`] | spy on `POST /jmap` only |
 //! | [`expected_basic_auth`] | the `Authorization` header `Client` builds for Basic auth |
@@ -29,10 +30,11 @@
 //! These come from the Findings log in `COVERAGE_PLAN.md`; breaking any of them
 //! makes the client fail in a way that looks like a bug in the test:
 //!
-//! * **Content type is byte-compared.** `Client::handle_error` matches
-//!   `application/problem+json` *exactly*, so a problem body must never be
-//!   served with `; charset=utf-8` appended ([`problem_response`] guarantees
-//!   this).
+//! * **Only the problem media type is matched.** `Client::handle_error` compares
+//!   the *media type* of `Content-Type`, ignoring parameters and case, so a
+//!   problem body may be served bare ([`problem_response`]) or with a
+//!   `; charset=utf-8` parameter ([`problem_response_with_charset`]); both must
+//!   surface as `Error::Problem`.
 //! * **Required response members.** A response missing any of
 //!   `GetResponse.{state,list,notFound}`,
 //!   `ChangesResponse.{accountId,oldState,newState,hasMoreChanges,created,updated,destroyed}`,
@@ -357,12 +359,24 @@ pub fn jmap_response_with_created_ids(
 
 /// An RFC 7807 `application/problem+json` error body (RFC 8620 §3.6.1).
 ///
-/// The content type is set to `application/problem+json` with **no**
-/// `; charset=utf-8` suffix: `Client::handle_error` byte-compares the header
-/// value, and appending a charset would downgrade the error to
-/// `Error::Server` (Findings #7).
+/// The content type is served as the bare `application/problem+json`. RFC 7807
+/// and RFC 8620 §3.6.1 both allow parameters on it, so
+/// [`problem_response_with_charset`] serves the same body with
+/// `; charset=utf-8` appended; `Client::handle_error` matches the media type
+/// alone and must route both to `Error::Problem`.
 pub fn problem_response(status: u16, body: Value) -> ResponseTemplate {
     ResponseTemplate::new(status).set_body_raw(body.to_string(), "application/problem+json")
+}
+
+/// [`problem_response`], but served with
+/// `Content-Type: application/problem+json; charset=utf-8`.
+///
+/// Same media type, one extra parameter (RFC 7231 §3.1.1.1). A client that
+/// byte-compares the header value downgrades this to `Error::Server` and loses
+/// the structured problem details.
+pub fn problem_response_with_charset(status: u16, body: Value) -> ResponseTemplate {
+    ResponseTemplate::new(status)
+        .set_body_raw(body.to_string(), "application/problem+json; charset=utf-8")
 }
 
 /// Answers `POST /jmap` with `template` for the rest of the server's life.

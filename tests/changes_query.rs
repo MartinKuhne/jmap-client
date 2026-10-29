@@ -1165,9 +1165,10 @@ async fn doc_example_changes_to_get_chain_wires_result_references() {
     )
     .await;
 
-    // This block mirrors the crate-level doc example in `src/lib.rs` exactly.
+    // This block mirrors the crate-level doc example in `src/lib.rs` exactly,
+    // including its RFC 8620 §5.2 compliant `maxChanges` of 16.
     let mut request = client.build();
-    let changes_request = request.changes_mailbox("78541").max_changes(0);
+    let changes_request = request.changes_mailbox("78541").max_changes(16);
     let properties_ref = changes_request.updated_properties_reference();
     let updated_ref = changes_request.updated_reference();
     request
@@ -1209,7 +1210,9 @@ async fn doc_example_changes_to_get_chain_wires_result_references() {
     assert_eq!(calls[0][0], "Mailbox/changes");
     assert_eq!(calls[0][2], "s0");
     assert_eq!(calls[0][1]["sinceState"], "78541");
-    assert_eq!(calls[0][1]["maxChanges"], 0);
+    // The value the doc example sends: RFC 8620 §5.2 requires `maxChanges` to
+    // be greater than 0 when `sinceState` is present.
+    assert_eq!(calls[0][1]["maxChanges"], 16);
 
     assert_eq!(calls[1][0], "Mailbox/get");
     assert_eq!(calls[1][2], "s1");

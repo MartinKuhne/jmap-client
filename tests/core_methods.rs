@@ -17,10 +17,11 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    connected_client, connected_client_json, expected_basic_auth, jmap_request_bodies, jmap_response,
-    jmap_response_with_created_ids, mount_jmap, mount_session, mount_session_json,
-    mount_session_template, problem_response, session_json, session_json_with_sieve,
-    single_jmap_request, ACCOUNT_ID, API_PATH, SESSION_PATH, SESSION_STATE, USERNAME,
+    connected_client, connected_client_json, expected_basic_auth, jmap_request_bodies,
+    jmap_response, jmap_response_with_created_ids, mount_jmap, mount_session, mount_session_json,
+    mount_session_template, problem_response, problem_response_with_charset, session_json,
+    session_json_with_sieve, single_jmap_request, ACCOUNT_ID, API_PATH, SESSION_PATH,
+    SESSION_STATE, USERNAME,
 };
 use jmap_client::client::Client;
 use jmap_client::core::error::{JMAPError, MethodErrorType, ProblemType};
@@ -1022,15 +1023,16 @@ async fn method_level_error_is_visible_on_the_tagged_response() {
 }
 
 #[tokio::test]
-async fn an_unrecognised_method_error_type_is_a_parse_error() {
+async fn an_unrecognised_method_error_type_surfaces_as_a_method_error() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
 
-    // Contract fact: `MethodErrorType` has no catch-all variant, so an error
-    // type the client does not model fails deserialisation of the *whole*
-    // Response object. RFC 8620 §3.6.2 says an unknown type MUST be treated
-    // like `serverFail`, which the client cannot do — the failure surfaces as
-    // Error::Parse, not Error::Method.
+    // RFC 8620 §3.6.2: "Should a client receive an error type it does not
+    // understand, it MUST treat it the same as the `serverFail` type." The
+    // client can only do that when the type parses, so an unmodelled type now
+    // lands in `MethodErrorType::Other` and reaches the caller as
+    // `Error::Method` instead of failing the parse of the whole Response
+    // object as `Error::Parse`.
     mount_jmap(
         &server,
         jmap_response(
@@ -1041,29 +1043,38 @@ async fn an_unrecognised_method_error_type_is_a_parse_error() {
     .await;
 
     let err = send_mailbox_get(&client).await.unwrap_err();
+    let Error::Method(method_err) = err else {
+        panic!("expected Error::Method, got {err:?}");
+    };
+    assert_eq!(
+        method_err.error(),
+        &MethodErrorType::Other("urn:ietf:params:jmap:error:notFound".to_string()),
+        "the catch-all must carry the exact string the server sent"
+    );
     assert!(
-        matches!(err, Error::Parse(_)),
-        "expected Error::Parse, got {err:?}"
+        method_err.is_server_fail_equivalent(),
+        "an unrecognised type MUST be handled as serverFail"
+    );
+    assert!(
+        method_err.to_string().contains("server fail"),
+        "the rendering says so too: {method_err}"
     );
 }
 
 #[tokio::test]
-async fn an_unrecognised_method_error_on_a_set_response_is_swallowed_as_an_empty_success() {
+async fn an_unrecognised_method_error_on_a_set_response_surfaces_as_a_method_error() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
 
-    // Hazard, pinned (Finding #112). `SingleMethodResponse` is
-    // `#[serde(untagged)]` (src/core/response.rs:104-109), so the `Error`
-    // arm is tried first and only *its* deserialisation failure moves on to
-    // `Ok`. `SetResponse` makes every member optional, so an `error`
-    // Invocation whose `type` is not modelled by `MethodErrorType`
-    // deserialises straight into an all-`None` `SetResponse` and the
-    // failure vanishes without a trace.
-    //
-    // The Mailbox/get sibling above at least surfaces Error::Parse, because
-    // `GetResponse` has required members the error body cannot satisfy. A
-    // Set call silently reports "nothing happened", which a caller cannot
-    // tell apart from a patch that legitimately changed nothing.
+    // The hazard this test used to pin (Finding #112), now fixed.
+    // `SingleMethodResponse` is `#[serde(untagged)]` (src/core/response.rs),
+    // so the `Error` arm is tried first and only *its* deserialisation failure
+    // moves on to `Ok`. `SetResponse` makes every member optional, so an
+    // `error` Invocation whose `type` was not modelled deserialised straight
+    // into an all-`None` `SetResponse` and the failed write vanished without a
+    // trace. RFC 8620 §3.6.2 requires the client to treat that type as
+    // `serverFail`, which starts with parsing it: the catch-all makes the
+    // `Error` arm win, so the caller gets `Error::Method`.
     mount_jmap(
         &server,
         jmap_response(
@@ -1075,35 +1086,22 @@ async fn an_unrecognised_method_error_on_a_set_response_is_swallowed_as_an_empty
 
     let mut request = client.build();
     request.set_mailbox().update("mf2").name("Renamed");
-    let mut response = request
+    let err = request
         .send_set_mailbox()
         .await
-        .expect("the untagged fall-through reads the error body as an empty SetResponse");
+        .expect_err("an error Invocation must never read as an empty success");
 
+    let Error::Method(method_err) = err else {
+        panic!("expected Error::Method, got {err:?}");
+    };
     assert_eq!(
-        response.account_id(),
-        None,
-        "nothing of the error body survives into the parsed response"
-    );
-    assert_eq!(
-        response.new_state(),
-        "",
-        "an empty newState is the only hint that nothing was returned"
-    );
-    let swallowed = response.updated("mf2").err();
-    assert!(
-        swallowed.is_some(),
-        "the caller's only signal is a generic internal error, not the server's method error"
-    );
-    assert_eq!(
-        swallowed.unwrap().to_string(),
-        "Internal error: Id mf2 not found.",
-        "the swallowed method error surfaces as a lookup miss, so a caller \
-         cannot tell 'the server refused' from 'the id was not in the map'"
+        method_err.error(),
+        &MethodErrorType::Other("tooManySubscriptions".to_string()),
+        "the server's own error type reaches the caller"
     );
     assert!(
-        response.updated_ids().is_none(),
-        "and no updated ids are reported either"
+        method_err.is_server_fail_equivalent(),
+        "an unrecognised type MUST be handled as serverFail"
     );
 
     // The call really did go out, so this is the response to *our* request
@@ -1112,6 +1110,58 @@ async fn an_unrecognised_method_error_on_a_set_response_is_swallowed_as_an_empty
         single_jmap_request(&server).await["methodCalls"][0][0],
         "Mailbox/set"
     );
+}
+
+#[tokio::test]
+async fn a_set_response_with_an_unmodelled_error_type_yields_error_method_when_unwrapped() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+
+    // Same RFC 8620 §3.6.2 requirement on the multi-call path: the error
+    // Invocation is deserialised through `TaggedMethodResponse`, and
+    // `unwrap_set_mailbox` must hand back `Error::Method` rather than a
+    // silently empty `SetResponse`. A Set response is the dangerous shape
+    // because every `SetResponse` member is optional.
+    mount_jmap(
+        &server,
+        jmap_response(
+            vec![
+                // RFC 8621 §2.6 — a Mailbox/set that renamed one Mailbox.
+                inv(
+                    "Mailbox/set",
+                    "s0",
+                    json!({
+                        "accountId": ACCOUNT_ID,
+                        "oldState": "78542",
+                        "newState": "78549",
+                        "updated": { "mf2": null }
+                    }),
+                ),
+                method_error("s1", "urn:example:params:error:boom"),
+            ],
+            SESSION_STATE,
+        ),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.set_mailbox().update("mf2").name("Renamed");
+    request.set_mailbox().update("mf3").name("Renamed too");
+    let mut response = request.send().await.unwrap();
+
+    assert!(!response.method_response_by_id("s0").unwrap().is_error());
+    let err = response
+        .method_response_by_pos(1)
+        .unwrap_set_mailbox()
+        .unwrap_err();
+    let Error::Method(method_err) = err else {
+        panic!("expected Error::Method, got {err:?}");
+    };
+    assert_eq!(
+        method_err.error(),
+        &MethodErrorType::Other("urn:example:params:error:boom".to_string())
+    );
+    assert!(method_err.is_server_fail_equivalent());
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +1233,53 @@ async fn limit_problem_carries_the_limit_name() {
     assert!(matches!(problem.error(), ProblemType::JMAP(JMAPError::Limit)));
     assert_eq!(problem.limit(), Some("maxSizeRequest"));
     assert_eq!(problem.status(), Some(400));
+}
+
+#[tokio::test]
+async fn problem_json_with_a_charset_parameter_still_maps_to_error_problem() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+
+    // RFC 8620 §3.6.1 serves every request-level error as an RFC 7807 problem
+    // document, and RFC 7231 §3.1.1.1 makes a media type case-insensitive and
+    // its parameters a separate thing. `application/problem+json;
+    // charset=utf-8` is therefore the same media type, and the client must
+    // parse the body into ProblemDetails either way. Byte-comparing the header
+    // used to answer this with the generic Error::Server and throw `type`,
+    // `status` and `detail` away (Finding #7).
+    mount_jmap(
+        &server,
+        problem_response_with_charset(
+            400,
+            // RFC 8620 §3.6.1.1, first example, verbatim.
+            json!({
+                "type": "urn:ietf:params:jmap:error:unknownCapability",
+                "status": 400,
+                "detail": "The Request object used capability 'https://example.com/apis/foobar', which is not supported by this server."
+            }),
+        ),
+    )
+    .await;
+
+    let err = send_mailbox_get(&client).await.unwrap_err();
+    let Error::Problem(problem) = err else {
+        panic!(
+            "a charset parameter on the media type must not lose the problem \
+             details, got {err:?}"
+        );
+    };
+    assert!(
+        matches!(
+            problem.error(),
+            ProblemType::JMAP(JMAPError::UnknownCapability)
+        ),
+        "the problem type must survive the charset parameter"
+    );
+    assert_eq!(problem.status(), Some(400));
+    assert!(problem
+        .detail()
+        .unwrap()
+        .contains("not supported by this server"));
 }
 
 // ---------------------------------------------------------------------------

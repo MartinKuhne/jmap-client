@@ -80,9 +80,10 @@ assert_eq!(email.subject().unwrap(), "test");
 assert_eq!(email.keywords(), ["$draft"]);
 
 // Fetch only the updated properties of all mailboxes that changed
-// since a state.
+// since a state. RFC 8620 §5.2: with `sinceState` present, `maxChanges`
+// MUST be greater than 0, so a compliant server rejects 0.
 let mut request = client.build();
-let changes_request = request.changes_mailbox("n").max_changes(0);
+let changes_request = request.changes_mailbox("n").max_changes(16);
 let properties_ref = changes_request.updated_properties_reference();
 let updated_ref = changes_request.updated_reference();
 request

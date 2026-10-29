@@ -44,6 +44,31 @@ use std::{
 const DEFAULT_TIMEOUT_MS: u64 = 10 * 1000;
 static USER_AGENT: &str = concat!("jmap-client/", env!("CARGO_PKG_VERSION"));
 
+/// The media type of an RFC 7807 problem document, which RFC 8620 §3.6.1 uses
+/// for every request-level error.
+const PROBLEM_JSON_MEDIA_TYPE: &str = "application/problem+json";
+
+/// `true` if `content_type` names [`PROBLEM_JSON_MEDIA_TYPE`].
+///
+/// Only the type and subtype are compared: a media type is case-insensitive and
+/// the `Content-Type` value may carry parameters such as `; charset=utf-8`
+/// (RFC 7231 §3.1.1.1, RFC 7807 §2), none of which change what the body is. A
+/// byte-for-byte comparison would send `application/problem+json; charset=utf-8`
+/// down the generic `Error::Server` path and throw the structured problem
+/// details away.
+fn is_problem_json(content_type: &[u8]) -> bool {
+    let Ok(value) = std::str::from_utf8(content_type) else {
+        return false;
+    };
+
+    value
+        .split(';')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .eq_ignore_ascii_case(PROBLEM_JSON_MEDIA_TYPE)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Credentials {
     Basic(String),
@@ -483,10 +508,10 @@ impl Client {
     pub async fn handle_error(response: Response) -> crate::Result<Response> {
         if response.status().is_success() {
             Ok(response)
-        } else if let Some(b"application/problem+json") = response
+        } else if response
             .headers()
             .get(header::CONTENT_TYPE)
-            .map(|h| h.as_bytes())
+            .is_some_and(|content_type| is_problem_json(content_type.as_bytes()))
         {
             Err(Error::Problem(serde_json::from_slice(
                 &response.bytes().await?,
@@ -764,5 +789,29 @@ mod tests {
             Credentials::basic("a", "b"),
             "the separator position is part of the encoding"
         );
+    }
+
+    /// RFC 7807 §2 / RFC 8620 §3.6.1: a problem document is recognised by its
+    /// media type alone, so parameters such as `charset` and the case of the
+    /// type must not change how the error is routed.
+    #[test]
+    fn problem_json_media_type_ignores_parameters_and_case() {
+        // The exact spelling `handle_error` used to byte-compare still matches.
+        assert!(is_problem_json(b"application/problem+json"));
+        // Parameters belong to the header value, not to the media type.
+        assert!(is_problem_json(b"application/problem+json; charset=utf-8"));
+        assert!(is_problem_json(b"application/problem+json;charset=UTF-8"));
+        assert!(is_problem_json(b"application/problem+json ; p=1"));
+        // Surrounding whitespace and case are tolerated (RFC 7231 §3.1.1.1).
+        assert!(is_problem_json(b"  application/problem+json  "));
+        assert!(is_problem_json(b"Application/Problem+JSON"));
+        assert!(is_problem_json(b"APPLICATION/PROBLEM+JSON; CHARSET=UTF-8"));
+        // Anything else is not a problem document.
+        assert!(!is_problem_json(b"application/json"));
+        assert!(!is_problem_json(b"text/plain"));
+        assert!(!is_problem_json(b"application/problem+xml"));
+        assert!(!is_problem_json(b"application/problem+jsonx"));
+        assert!(!is_problem_json(b"text/problem+json; charset=utf-8"));
+        assert!(!is_problem_json(b""));
     }
 }
