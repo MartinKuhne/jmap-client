@@ -289,11 +289,27 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
   P7 depends on reliable WS handshake assertions — fix the mock to flush/await
   the write before closing. Owner: P7 agent.
 
-### P4 — Integration tests: mail domain  ⬜
-- [ ] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
-- [ ] tests/email.rs: get/set/query/import/parse/copy + keywords + helpers
-- [ ] tests/thread.rs + tests/search_snippet.rs
-- [ ] Verify + commit
+### P4 — Integration tests: mail domain  ✅
+- [x] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
+      (26 tests — `Client::mailbox_{get,get_with_role,create,rename,move,
+      set_role,set_sort_order,subscribe,unsubscribe,set_rights,acl,
+      update,destroy,has_email,has_child,query,changes}` plus the
+      `Request::{get,changes,query,query_changes,set}_mailbox` builders,
+      `Role` (de)serialisation and `Property`/`ACL` Display).
+- [x] tests/email.rs: get/set/query/import/parse/copy + keywords + helpers
+      (37 tests — `Client::email_{get,get_body_value,import,
+      import_account,set_mailbox,set_mailboxes,set_keyword,set_keywords,
+      update,destroy,copy,parse,query,search_snippet_get}` plus the
+      `Request::{get,changes,query,query_changes,set,copy,import,parse}_email`
+      builders, `EmailBodyPart`/`EmailValue` builders, header forms and the
+      `header:…:as<Form>` alias table).
+- [x] tests/thread.rs + tests/search_snippet.rs
+      (11 + 11 tests — `Client::thread_get`,
+      `Request::{get_thread,send_get_thread,changes_thread,
+      send_changes_thread}`, `thread::Property`; `Client::search_snippet_get`,
+      `Request::{get_search_snippet,send_get_search_snippet}`,
+      `SearchSnippetGetRequest::{email_id,email_ids,email_ids_ref,filter}`).
+- [x] Verify + commit — P4 closed by this increment (85 new tests green).
 
 ### P5 — Integration tests: submission / identity / vacation  ⬜
 - [ ] tests/email_submission.rs (incl. delivery time, undo, bounce)
@@ -337,6 +353,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 2 | 2026-10-28 | P2: `mock-jmap` EventSource (SSE) + RFC 8887 WebSocket legs, `PushBus` push model, mock control API for driving pushes against open streams | 6.04% (unchanged) | 9 client pass · 41 P2 stream tests pass · 35 P1 mock self-tests pass · 4 mock doctests pass | `cargo test -p mock-jmap`, `cargo test -p jmap-client`, `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` all green; the summary lists only `src/` rows. Coverage unchanged by design (P2 adds mock capability, not client-facing tests). Deviations recorded below. |
 | 3 | 2026-10-28 | P3 (part 1): shared wiremock fixture layer `tests/common/mod.rs` + `tests/core_methods.rs` — 28 core protocol tests (session fetch, request/response round-trips, call ids, result references, createdIds, capability filtering, problem/method/parse error paths, session staleness + refresh, account/timeout/headers) | **16.67%** lines (6953 instr., 1159 covered) — **+9.90 pp / +688 lines** over the 6.77% re-measured baseline | **37 client pass** (7 lib unit + 2 crypto-provider + 28 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (7 warnings, all pre-existing in `mock-jmap`), coverage summary lists only `src/` rows. Baseline re-measured at **6.77%** with the P3 files removed (the ledger's 7.05% predates the P1/P2 branch state); deltas below are against the re-measured figure. `tests/changes_query.rs` (P3 box 2) is still open. |
 | 4 | 2026-10-28 | P3 (part 2): `tests/changes_query.rs` — 23 changes/query/queryChanges tests (Mailbox+Email+Thread changes round-trips and RFC §5.2 paging, `updatedProperties`, Mailbox/Email query filter+Comparator+collation+window, Mailbox/Email queryChanges with `AddedItem`, `cannotCalculateChanges`/`tooManyChanges`/`unsupportedSort`/`unsupportedFilter`, `canCalculateChanges=false`, and the lib.rs-doc-example + RFC 8621 §2.6/§4.10 result-reference chains) | **22.26%** lines (6953 instr., 1548 covered) — **+5.59 pp / +389 lines** over P3 part 1's 16.67% | **60 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only 7 warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `core/changes.rs` and `core/query_changes.rs` went from 0.00% to ~94%/~94%; `core/query.rs` 25.53% → 71.63%. P3 is now closed. New contract facts recorded as Findings 33–38. |
+| 5 | 2026-10-28 | P4: mail-domain wiremock integration tests — `tests/mailbox.rs` (26), `tests/email.rs` (37), `tests/thread.rs` (11), `tests/search_snippet.rs` (11). Drives every `Client::mailbox_*` / `Client::email_*` / `Client::thread_get` / `Client::search_snippet_get` helper plus the matching `Request::` builders against RFC-verbatim 8621/8620 fixtures; each test owns its `MockServer` and asserts the method name went on the wire. | **46.31%** lines (6953 instr., 3220 covered) — **+24.05 pp / +1672 lines** over P3's 22.26% | **145 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `mailbox/helpers.rs`, `thread/{get,helpers,mod}.rs` and `email/search_snippet.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 39–52. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -390,6 +407,50 @@ Still at 0.00% after P3: `core/copy.rs`, `core/mod.rs`,
 `thread/{get,mod}.rs`, and every
 `email_submission`/`identity`/`principal`/`push_subscription`/`sieve`
 module — i.e. exactly the P4–P6 targets.
+
+#### P4 per-file line-coverage delta
+
+Against the state after P3 (`22.26%` / 1548 lines covered), re-measured with
+the four P4 files removed from `tests/`.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `thread/mod.rs` | 0.00% | **100.00%** | +100.00 | 0 → 8 (+8) |
+| `thread/get.rs` | 0.00% | **100.00%** | +100.00 | 0 → 6 (+6) |
+| `email/search_snippet.rs` | 0.00% | **100.00%** | +100.00 | 0 → 55 (+55) |
+| `mailbox/helpers.rs` | 25.68% | **100.00%** | +74.32 | 57 → 222 (+165) |
+| `thread/helpers.rs` | 34.38% | **100.00%** | +65.62 | 11 → 32 (+21) |
+| `email/helpers.rs` | 12.99% | **97.74%** | +84.75 | 46 → 346 (+300) |
+| `mailbox/get.rs` | 31.03% | **96.55%** | +65.52 | 27 → 84 (+57) |
+| `blob/upload.rs` | 0.00% | **75.00%** | +75.00 | 0 → 42 (+42) |
+| `email/set.rs` | 0.00% | **74.35%** | +74.35 | 0 → 258 (+258) |
+| `email/mod.rs` | 6.86% | **74.51%** | +67.65 | 21 → 228 (+207) |
+| `email/get.rs` | 0.00% | **73.08%** | +73.08 | 0 → 152 (+152) |
+| `email/parse.rs` | 0.00% | **72.73%** | +72.73 | 0 → 56 (+56) |
+| `email/import.rs` | 0.00% | **67.03%** | +67.03 | 0 → 61 (+61) |
+| `mailbox/mod.rs` | 36.84% | **73.68%** | +36.84 | 21 → 42 (+21) |
+| `mailbox/set.rs` | 28.89% | **68.89%** | +40.00 | 26 → 62 (+36) |
+| `core/copy.rs` | 0.00% | **61.84%** | +61.84 | 0 → 47 (+47) |
+| `mailbox/query.rs` | 57.89% | **89.47%** | +31.58 | 22 → 34 (+12) |
+| `core/set.rs` | 25.09% | **56.93%** | +31.84 | 67 → 152 (+85) |
+| `email/query.rs` | 11.32% | **21.38%** | +10.06 | 18 → 34 (+16) |
+| `core/request.rs` | 54.40% | **62.99%** | +8.59 | 266 → 308 (+42) |
+| `core/get.rs` | 66.22% | **74.32%** | +8.10 | 49 → 55 (+6) |
+| `lib.rs` | 31.51% | **36.99%** | +5.48 | 23 → 27 (+4) |
+| `core/response.rs` | 19.81% | **20.75%** | +0.94 | 85 → 89 (+4) |
+| `client.rs` | 81.29% | **82.21%** | +0.92 | 265 → 268 (+3) |
+| **TOTAL** | **22.26%** | **46.31%** | **+24.05** | **1548 → 3220 (+1672)** |
+
+Unchanged by this increment: `core/{changes,query,query_changes,error}.rs`,
+`core/session.rs`, `crypto.rs`, `event_source/parser.rs`.
+
+Still cold after P4 (P5/P6/P7 targets): `core/mod.rs`,
+`event_source/{mod,stream}.rs` (partly), `blob/{copy,download,helpers}.rs`,
+`client_ws.rs`, and every
+`email_submission`/`identity`/`principal`/`push_subscription`/`sieve`
+module. `email/query.rs` (21.38%) and `core/response.rs` (20.75%) remain
+low because most of their surface is per-filter / per-method-variant code that
+P8's unit sweep is a better fit for than per-request integration tests.
 
 ## Findings log
 
@@ -594,3 +655,86 @@ _Discovered writing the P3 changes/query/queryChanges wiremock tests._
     generic `ChangesResponse<O>` aliases (`MailboxChangesResponse`,
     `EmailChangesResponse`, `ThreadChangesResponse`) are public in
     `core::response`.
+
+39. **`Mailbox<Set>` emits an explicit JSON `null` for a cleared member.**
+    The `skip_serializing_if` guards (`string_not_set`, `role_not_set`) only
+    suppress the `Some("")` / `Some(Role::None)` seeds that `Mailbox::new()`
+    installs. Once a setter assigns `None` the member rides along as `null`,
+    so `mailbox_create(name, None, Role::None)` serialises
+    `{"name":…,"parentId":null,"role":null}` and `mailbox_move(id, None)`
+    serialises `{"<id>":{"parentId":null}}`. RFC 8620 §5.3 explicitly allows
+    `null` in a patch object to mean "clear", so this is conformant — but a
+    test that expects the key to be *absent* will fail.
+40. **`Email/copy` answers one call with TWO method responses.** RFC 8621
+    §4.7 says the server returns the `Email/copy` result *and* an implicit
+    `Email/set` response under the same call id, copy result first.
+    `Request::send_single` pops the **last** response, so `Client::email_copy`
+    against a spec-following server tries to parse the `Email/set` body as
+    `CopyResponse` and fails with `Error::Parse`. The happy-path test mounts
+    only the `Email/copy` response; the two-response shape is pinned by
+    `email_copy_with_the_rfc_implicit_set_response_is_a_parse_error`.
+41. **`Email/copy`'s failure member is `notCreated`, not `notCopied`.**
+    RFC 8621 §4.7 reuses the `/set` error vocabulary. Anything expecting a
+    `notCopied` member is inventing one.
+42. **There is no `mailboxExists` SetErrorType.** RFC 8621 §2.5 defines
+    `mailboxHasChild` and `mailboxHasEmail` for the destroy guards; the
+    client's `SetErrorType` names exactly those. Per Finding 27, only variants
+    the enum actually names may be asserted.
+43. **No dedicated seen/flagged/draft helpers.** The task brief assumed
+    `email_mark_seen`-style methods; the crate exposes only the generic
+    keyword setters. Use `email_set_keyword(id, "$seen" | "$flagged" |
+    "$draft", bool)`, which emits the dotted
+    `keywords/$<name>` patch key.
+44. **No `Client::mailbox_query_changes` and no `Client::thread_changes`.**
+    `queryChanges` is reachable only at the `Request::` level
+    (`Request::query_mailbox_changes` / `query_email_changes`), and Thread
+    changes only through `Request::changes_thread` +
+    `send_changes_thread`. Tests that want them must build the request
+    explicitly.
+45. **`Client::email_copy` cannot set `onSuccessDestroyOriginal`.** The
+    client helper does not expose it; only `Request::copy_email` does, so a
+    move-between-accounts test must go through the builder.
+46. **Header aliases are exact, case-sensitive strings — and `Message-ID` is
+    spelled with an all-caps `ID`.** `EmailProperties` aliases `messageId`
+    as `header:Message-ID:asMessageIds`, `cc` as `header:Cc:asAddresses`,
+    `bcc` as `header:Bcc:asAddresses`, `sentAt` as `header:Date:asDate`,
+    and so on (all only when the `debug` feature is off). A server that
+    answers `header:Message-Id:asMessageIds` — mixed case — does **not**
+    populate `Email::message_id`; the value falls through to the flattened
+    `Email::headers` map as `HeaderValue::AsTextAll`. Pinned by
+    `header_aliases_are_case_sensitive_so_other_spellings_land_in_the_header_map`.
+47. **`header:To:asGroupedAddresses` has no alias.** Unlike
+    `header:To:asAddresses`, the grouped form is not aliased to `to`, so it
+    always lands in the flattened `headers` map as
+    `HeaderValue::AsGroupedAddresses`. Supplying both `to` and
+    `header:To:asAddresses` in one record is a duplicate-field error.
+48. **`Client::thread_get` is `take_list().pop()`.** A spec-following server
+    that answers every requested id returns the *last* record, not the one
+    whose id was passed in. `thread_get` is therefore only safe for
+    single-id fetches; multi-id reads must use
+    `Request::get_thread().ids([..])` and index `response.list()`. Pinned by
+    `thread_get_pops_the_last_list_entry_when_the_server_returns_several`.
+49. **`Request::send_single<T>` deserialises EVERY response in the
+    envelope as `T`.** It parses the whole `methodResponses` array as
+    `Vec<SingleMethodResponse<T>>` *before* popping the last entry, so a
+    heterogeneous batch (e.g. `Email/query` followed by `SearchSnippet/get`)
+    fails with `Error::Parse` on the leading response even when the target
+    response is perfectly well formed. Multi-method batches must use
+    `Request::send()` and unwrap per method via
+    `TaggedMethodResponse::unwrap_*` / `Response::method_response_by_id`.
+    Pinned by `send_single_cannot_deserialise_a_heterogeneous_batch`.
+50. **`Email/import`'s `created` record carries only
+    `{id, blobId, threadId, size}`.** RFC 8621 §4.8. The mailbox placement
+    and keywords exist only on the *request*, so `email.mailbox_ids()` on the
+    returned `Email` is empty — assert the request body, not the record.
+51. **Creation-id prefixes differ per request type.** `SetRequest::create()`
+    yields `c0`, `c1`, … while `EmailImport::create_id()` yields `i0`,
+    `i1`, … and `CopyRequest::create(id)` keys by the caller-supplied id.
+    A test that hard-codes `c0` for an import will never find its record.
+52. **`Email` and `EmailBodyPart` flatten unknown keys into
+    `AHashMap<Header, HeaderValue>`.** Any member that is not a known
+    property and not a `header:<Name>:as<Form>[:all]` string makes
+    `Header::parse` fail, which fails the *whole* response with
+    `Error::Parse`. Canned fixtures must therefore be exactly the RFC shape —
+    a stray `"partId"` on an `Email` record, or a typo'd property name,
+    takes down the entire `Email/get`.
