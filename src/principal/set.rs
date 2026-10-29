@@ -147,3 +147,221 @@ impl SetObject for Principal<Get> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `Principal<Set>` patch builders
+    //! (RFC 9670 §4). Every setter is driven through the fluent API and
+    //! the resulting JSON object is asserted as a whole, so a renamed or
+    //! dropped member shows up immediately.
+
+    use super::*;
+    use serde_json::json;
+
+    fn principal() -> Principal<Set> {
+        <Principal<Set> as SetObject>::new(Some(0))
+    }
+
+    /// A fresh patch object writes nothing at all: the `""` / empty-list /
+    /// empty-map seeds `SetObject::new` installs are all suppressed by
+    /// the `*_not_set` guards.
+    #[test]
+    fn a_fresh_patch_object_is_empty() {
+        assert_eq!(serde_json::to_value(principal()).unwrap(), json!({}));
+    }
+
+    /// RFC 9670 §4 — the scalar members, with `type` going through
+    /// `Type`'s serde rename.
+    #[test]
+    fn scalar_builders_serialise_the_rfc_names() {
+        let mut principal = principal();
+        principal
+            .name("Alice Anderson")
+            .description(Some("Team lead"))
+            .email("alice@example.org")
+            .secret("s3cr3t")
+            .timezone(Some("Europe/Berlin"))
+            .picture(Some("https://example.org/alice.png"))
+            .quota(Some(1_073_741_824))
+            .ptype(Type::Individual);
+
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "type": "individual",
+                "name": "Alice Anderson",
+                "description": "Team lead",
+                "email": "alice@example.org",
+                "timezone": "Europe/Berlin",
+                "secret": "s3cr3t",
+                "quota": 1_073_741_824,
+                "picture": "https://example.org/alice.png"
+            })
+        );
+    }
+
+    /// RFC 9670 §4 — the principal types all round-trip through the
+    /// `ptype` builder under their serde names.
+    #[test]
+    fn ptype_covers_every_principal_type() {
+        for (ptype, wire) in [
+            (Type::Individual, "individual"),
+            (Type::Group, "group"),
+            (Type::Resource, "resource"),
+            (Type::Location, "location"),
+            (Type::Domain, "domain"),
+            (Type::List, "list"),
+            (Type::Other, "other"),
+        ] {
+            let mut principal = principal();
+            principal.ptype(ptype.clone());
+            assert_eq!(
+                serde_json::to_value(&principal).unwrap(),
+                json!({ "type": wire }),
+                "{ptype:?} must serialise as {wire}"
+            );
+        }
+    }
+
+    /// RFC 9670 §4 — `dkim` carries the selector and an expiration, and
+    /// because the struct has no `skip_serializing_if` both `None` members
+    /// ride the wire as explicit `null` (Finding #71).
+    #[test]
+    fn dkim_builder_and_its_null_members() {
+        let mut principal = principal();
+        principal.dkim(DKIM::new(Some("sel1"), Some(1_735_689_600_i64)));
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "dkim": {
+                    "dkimSelector": "sel1",
+                    "dkimExpiration": 1_735_689_600_i64
+                }
+            })
+        );
+
+        let dkim = DKIM::new(None::<String>, None);
+        assert!(dkim.selector().is_none());
+        assert_eq!(dkim.expiration(), None);
+        principal.dkim(dkim);
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "dkim": { "dkimSelector": null, "dkimExpiration": null }
+            }),
+            "an absent selector and an absent expiration are indistinguishable from cleared ones"
+        );
+    }
+
+    /// RFC 9670 §4 — the three list members.
+    #[test]
+    fn list_builders_collect_their_items() {
+        let mut principal = principal();
+        principal
+            .capabilities(Some(["urn:ietf:params:jmap:principal"]))
+            .aliases(Some(["alice@example.org", "a@example.org"]))
+            .members(Some(["P1", "P2"]));
+
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "capabilities": ["urn:ietf:params:jmap:principal"],
+                "aliases": ["alice@example.org", "a@example.org"],
+                "members": ["P1", "P2"]
+            })
+        );
+    }
+
+    /// Passing `None` to a list builder clears the field to `None`, which
+    /// the guard no longer suppresses — the patch sends `null`
+    /// (Finding #39).
+    #[test]
+    fn list_builders_clear_to_null() {
+        let mut principal = principal();
+        principal.aliases(None::<[&str; 0]>);
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({ "aliases": null })
+        );
+
+        principal.members(None::<[&str; 0]>);
+        principal.capabilities(None::<[&str; 0]>);
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "aliases": null,
+                "members": null,
+                "capabilities": null
+            })
+        );
+    }
+
+    /// RFC 9670 §4 — the `acl` map is principal → list of rights, and
+    /// the rights go out under their serde `mayXxx` names, not the
+    /// `Display` form (Finding #72).
+    #[test]
+    fn acl_map_builder() {
+        let mut principal = principal();
+        let mut acls = AHashMap::new();
+        acls.insert("P2".to_string(), vec![ACL::ReadItems, ACL::Administer]);
+        principal.acl(Some(acls));
+
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({ "acl": { "P2": ["mayReadItems", "mayShare"] } })
+        );
+
+        principal.acl(None);
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({ "acl": null }),
+            "a cleared acl is sent as null, not omitted"
+        );
+    }
+
+    /// RFC 9670 §4.4 — the dotted patch keys `aliases/<value>` and
+    /// `members/<value>`, built from `Property::Aliases`/
+    /// `Property::Members`; the value may be a `#<createId>` reference.
+    #[test]
+    fn alias_and_member_dotted_keys() {
+        let mut principal = principal();
+        principal
+            .alias("a@example.org", true)
+            .alias("old@example.org", false)
+            .member("P2", true)
+            .member("#c1", false);
+
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "aliases/a@example.org": true,
+                "aliases/old@example.org": false,
+                "members/P2": true,
+                "members/#c1": false
+            }),
+            "the key prefix is the property name, so `#c1` is a creation reference"
+        );
+    }
+
+    /// `SetObject::create_id` spells the `c<n>` creation id for the Set
+    /// flavour; the Get flavour never carries one.
+    #[test]
+    fn create_id_is_the_c_prefixed_counter() {
+        assert_eq!(principal().create_id(), Some("c0".to_string()));
+        assert_eq!(
+            <Principal<Set> as SetObject>::new(Some(7)).create_id(),
+            Some("c7".to_string())
+        );
+        assert_eq!(
+            <Principal<Set> as SetObject>::new(None).create_id(),
+            None,
+            "an update patch has no create id"
+        );
+        assert_eq!(
+            serde_json::from_value::<Principal<Get>>(json!({ "id": "P1" }))
+                .unwrap()
+                .create_id(),
+            None
+        );
+    }
+}

@@ -971,3 +971,479 @@ impl From<Email> for TestEmail {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure property logic of the mail module:
+    //! `Property` (RFC 8621 §4.1), `Header`/`HeaderForm`
+    //! (§4.1.2/§4.1.3), `BodyProperty` (§4.1.4), the `HeaderValue`
+    //! forms and the two session capability records (§2). Every fixture
+    //! is JSON deserialised in place — no server, no socket, no async.
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §4.1 — `Display` and `Serialize` must agree on the wire
+    /// name of every variant, and reading that name back must land on the
+    /// same variant.
+    #[test]
+    fn property_display_and_serde_round_trip_every_variant() {
+        let cases: Vec<(Property, &str)> = vec![
+            (Property::Id, "id"),
+            (Property::BlobId, "blobId"),
+            (Property::ThreadId, "threadId"),
+            (Property::MailboxIds, "mailboxIds"),
+            (Property::Keywords, "keywords"),
+            (Property::Size, "size"),
+            (Property::ReceivedAt, "receivedAt"),
+            (Property::MessageId, "messageId"),
+            (Property::InReplyTo, "inReplyTo"),
+            (Property::References, "references"),
+            (Property::Sender, "sender"),
+            (Property::From, "from"),
+            (Property::To, "to"),
+            (Property::Cc, "cc"),
+            (Property::Bcc, "bcc"),
+            (Property::ReplyTo, "replyTo"),
+            (Property::Subject, "subject"),
+            (Property::SentAt, "sentAt"),
+            (Property::BodyStructure, "bodyStructure"),
+            (Property::BodyValues, "bodyValues"),
+            (Property::TextBody, "textBody"),
+            (Property::HtmlBody, "htmlBody"),
+            (Property::Attachments, "attachments"),
+            (Property::HasAttachment, "hasAttachment"),
+            (Property::Preview, "preview"),
+            (
+                Property::Header(Header::as_addresses("X-Mailing-List", true)),
+                "header:X-Mailing-List:asAddresses:all",
+            ),
+            (
+                Property::Other("x-vendor-property".to_string()),
+                "x-vendor-property",
+            ),
+        ];
+
+        // 25 named properties + the `header:` arm + the `Other` catch-all
+        assert_eq!(cases.len(), 27);
+        for (property, wire) in cases {
+            assert_eq!(property.to_string(), wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(&property).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<Property>(json!(wire)).unwrap(),
+                property,
+                "{wire} must round-trip back to the variant it came from"
+            );
+        }
+    }
+
+    /// RFC 8621 §4.1 — `Property::parse` maps the known names, hands the
+    /// `header:` prefix to `Header::parse`, and falls through to `Other`
+    /// for anything else. The prefix test is on `"header:"`, not
+    /// `"header"`, so `headerX` is an `Other`, not a header.
+    #[test]
+    fn property_parse_covers_names_header_arm_and_fallback() {
+        assert_eq!(Property::parse("mailboxIds"), Some(Property::MailboxIds));
+        assert_eq!(Property::parse("keywords"), Some(Property::Keywords));
+        assert_eq!(Property::parse("bodyStructure"), Some(Property::BodyStructure));
+        assert_eq!(
+            Property::parse("header:Subject:asText"),
+            Some(Property::Header(Header::as_text("Subject", false)))
+        );
+        assert_eq!(
+            Property::parse("header:Received:all"),
+            Some(Property::Header(Header::as_raw("Received", true)))
+        );
+        assert_eq!(
+            Property::parse("x-vendor"),
+            Some(Property::Other("x-vendor".to_string()))
+        );
+        assert_eq!(
+            Property::parse("headerX"),
+            Some(Property::Other("headerX".to_string())),
+            "only `header:` (with the colon) routes to the header arm"
+        );
+    }
+
+    /// The `PropertyVisitor` failure arm: a `header:` property whose form
+    /// is not one of the six the RFC defines makes `parse` return `None`,
+    /// and the visitor turns that into a serde error naming the string.
+    #[test]
+    fn property_deserialise_reports_an_unparsable_header_form() {
+        assert_eq!(Property::parse("header:Subject:notAForm"), None);
+        let error = serde_json::from_value::<Property>(json!("header:Subject:notAForm"))
+            .expect_err("an unknown header form must not deserialise");
+        assert_eq!(
+            error.to_string(),
+            "Failed to parse JMAP property 'header:Subject:notAForm'"
+        );
+    }
+
+    /// RFC 8621 §4.1.2 — the six header forms, their `asXxx` tokens and
+    /// the `:asXxx` suffix each renders. `Raw` is the absence of a form
+    /// and therefore renders as the empty string.
+    #[test]
+    fn header_form_parse_and_display() {
+        let cases: &[(&str, HeaderForm, &str)] = &[
+            ("asText", HeaderForm::Text, ":asText"),
+            ("asAddresses", HeaderForm::Addresses, ":asAddresses"),
+            (
+                "asGroupedAddresses",
+                HeaderForm::GroupedAddresses,
+                ":asGroupedAddresses",
+            ),
+            ("asMessageIds", HeaderForm::MessageIds, ":asMessageIds"),
+            ("asDate", HeaderForm::Date, ":asDate"),
+            ("asURLs", HeaderForm::URLs, ":asURLs"),
+        ];
+
+        assert_eq!(cases.len(), 6, "the RFC defines exactly six forms");
+        for (token, form, suffix) in cases {
+            assert_eq!(HeaderForm::parse(token), Some(form.clone()), "{token}");
+            assert_eq!(form.to_string(), *suffix, "{form:?} Display");
+        }
+
+        assert_eq!(HeaderForm::Raw.to_string(), "", "Raw adds no suffix");
+        assert_eq!(HeaderForm::parse("asRaw"), None);
+        assert_eq!(HeaderForm::parse("text"), None);
+        assert_eq!(HeaderForm::parse(""), None);
+    }
+
+    /// RFC 8621 §4.1.2 — the seven constructors build exactly the header
+    /// their `Display` string spells back out, and `Header::parse` is the
+    /// inverse of that string for every one of them.
+    #[test]
+    fn header_constructors_round_trip_through_display_and_parse() {
+        let built: Vec<(Header, &str)> = vec![
+            (Header::as_raw("X-Raw", false), "header:X-Raw"),
+            (Header::as_raw("X-Raw", true), "header:X-Raw:all"),
+            (Header::as_text("X-Text", false), "header:X-Text:asText"),
+            (Header::as_text("X-Text", true), "header:X-Text:asText:all"),
+            (
+                Header::as_addresses("To", false),
+                "header:To:asAddresses",
+            ),
+            (
+                Header::as_grouped_addresses("To", true),
+                "header:To:asGroupedAddresses:all",
+            ),
+            (
+                Header::as_message_ids("Message-Id", false),
+                "header:Message-Id:asMessageIds",
+            ),
+            (Header::as_date("Date", true), "header:Date:asDate:all"),
+            (
+                Header::as_urls("List-Subscribe", false),
+                "header:List-Subscribe:asURLs",
+            ),
+        ];
+
+        for (header, wire) in built {
+            assert_eq!(header.to_string(), wire, "{header:?} Display");
+            assert_eq!(serde_json::to_value(&header).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<Header>(json!(wire)).unwrap(),
+                header,
+                "{wire} must round-trip back to the same header"
+            );
+            assert_eq!(Header::parse(wire), Some(header.clone()));
+        }
+    }
+
+    /// RFC 8621 §4.1.2 — the shape `Header::parse` accepts is
+    /// `header:<name>[:as<Form>][:all]`. Anything outside it is `None`:
+    /// the `all` flag is only recognised in the third and fourth position
+    /// and only as the literal `all`, so `header:To:all:asText` fails.
+    #[test]
+    fn header_parse_accepts_the_grammar_and_rejects_everything_else() {
+        assert_eq!(
+            Header::parse("header:Subject"),
+            Some(Header {
+                name: "Subject".to_string(),
+                form: HeaderForm::Raw,
+                all: false,
+            })
+        );
+        assert_eq!(
+            Header::parse("header:To:asAddresses:all"),
+            Some(Header {
+                name: "To".to_string(),
+                form: HeaderForm::Addresses,
+                all: true,
+            })
+        );
+        // A `header:` with no name at all parses, to an empty name.
+        assert_eq!(
+            Header::parse("header:"),
+            Some(Header {
+                name: String::new(),
+                form: HeaderForm::Raw,
+                all: false,
+            })
+        );
+
+        assert_eq!(Header::parse("header"), None, "a name is required");
+        assert_eq!(Header::parse(""), None);
+        assert_eq!(Header::parse("Subject"), None, "the prefix is required");
+        assert_eq!(Header::parse("header:Subject:bogus"), None);
+        assert_eq!(Header::parse("header:To:all:asText"), None);
+        assert_eq!(Header::parse("header:To:asText:all:extra"), None);
+    }
+
+    /// The `HeaderVisitor` failure arm, reached through `Deserialize`
+    /// rather than a direct `parse` call.
+    #[test]
+    fn header_deserialise_reports_an_unparsable_header() {
+        let error = serde_json::from_value::<Header>(json!("X-Raw"))
+            .expect_err("a bare header name is not a JMAP header property");
+        assert_eq!(error.to_string(), "Failed to parse JMAP header 'X-Raw'");
+    }
+
+    /// RFC 8621 §4.1.4 — the twelve body-structure property names plus
+    /// the `header:` arm, driven through `Display`, `Serialize` and
+    /// `Deserialize`.
+    #[test]
+    fn body_property_display_and_serde_round_trip_every_variant() {
+        let cases: Vec<(BodyProperty, &str)> = vec![
+            (BodyProperty::PartId, "partId"),
+            (BodyProperty::BlobId, "blobId"),
+            (BodyProperty::Size, "size"),
+            (BodyProperty::Headers, "headers"),
+            (BodyProperty::Name, "name"),
+            (BodyProperty::Type, "type"),
+            (BodyProperty::Charset, "charset"),
+            (BodyProperty::Disposition, "disposition"),
+            (BodyProperty::Cid, "cid"),
+            (BodyProperty::Language, "language"),
+            (BodyProperty::Location, "location"),
+            (BodyProperty::SubParts, "subParts"),
+            (
+                BodyProperty::Header(Header::as_text("Content-Type", false)),
+                "header:Content-Type:asText",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 13, "twelve members plus the header arm");
+        for (property, wire) in cases {
+            assert_eq!(property.to_string(), wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(&property).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<BodyProperty>(json!(wire)).unwrap(),
+                property,
+                "{wire} must round-trip back to the variant it came from"
+            );
+        }
+    }
+
+    /// Unlike `email::Property`, `BodyProperty` has no `Other` catch-all:
+    /// an unknown name is a parse failure, and the visitor reports it.
+    #[test]
+    fn body_property_parse_rejects_unknown_names_and_bad_header_forms() {
+        assert_eq!(
+            BodyProperty::parse("header:Cid:asText"),
+            Some(BodyProperty::Header(Header::as_text("Cid", false)))
+        );
+        assert_eq!(BodyProperty::parse("header:Cid:bogus"), None);
+        assert_eq!(BodyProperty::parse("notAProperty"), None);
+        assert_eq!(BodyProperty::parse(""), None);
+
+        let error = serde_json::from_value::<BodyProperty>(json!("nope"))
+            .expect_err("an unknown body property must not deserialise");
+        assert_eq!(
+            error.to_string(),
+            "Failed to parse JMAP body property 'nope'"
+        );
+    }
+
+    /// RFC 8621 §4.1.2 — the header value forms are untagged, so the
+    /// JSON shape alone picks the variant. `HeaderValue` does not
+    /// implement `PartialEq`, so the round trip is checked by comparing
+    /// the re-serialised wire form.
+    #[test]
+    fn header_value_forms_survive_a_wire_round_trip() {
+        let cases: Vec<(HeaderValue, serde_json::Value)> = vec![
+            (HeaderValue::AsText("Team lunch".into()), json!("Team lunch")),
+            (
+                HeaderValue::AsTextAll(vec!["a".into(), "b".into()]),
+                json!(["a", "b"]),
+            ),
+            (
+                HeaderValue::AsDate("2024-07-03T09:46:40Z".parse().unwrap()),
+                json!("2024-07-03T09:46:40Z"),
+            ),
+            (
+                HeaderValue::AsDateAll(vec!["2024-07-03T09:46:40Z".parse().unwrap()]),
+                json!(["2024-07-03T09:46:40Z"]),
+            ),
+            (
+                HeaderValue::AsAddresses(vec![EmailAddress::from((
+                    "Joe".to_string(),
+                    "joe@example.com".to_string(),
+                ))]),
+                json!([{ "name": "Joe", "email": "joe@example.com" }]),
+            ),
+            (
+                HeaderValue::AsAddressesAll(vec![vec![EmailAddress::from("joe@example.com")]]),
+                json!([[{ "name": null, "email": "joe@example.com" }]]),
+            ),
+            (
+                HeaderValue::AsGroupedAddresses(vec![serde_json::from_value(json!({
+                    "name": "Team",
+                    "addresses": [{ "name": null, "email": "joe@example.com" }]
+                }))
+                .unwrap()]),
+                json!([{
+                    "name": "Team",
+                    "addresses": [{ "name": null, "email": "joe@example.com" }]
+                }]),
+            ),
+        ];
+
+        for (value, wire) in cases {
+            let serialised = serde_json::to_value(&value).unwrap();
+            assert_eq!(serialised, wire, "{value:?} must serialise as {wire}");
+            let back: HeaderValue = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&back).unwrap(),
+                serialised,
+                "{wire} must round-trip back to the same form"
+            );
+        }
+    }
+
+    /// RFC 8621 §2 — the `urn:ietf:params:jmap:mail` capability block.
+    /// `maxMailboxesPerEmail` is genuinely optional (null = no limit);
+    /// `maxMailboxDepth` is not (Finding #30), so the fixture sends an
+    /// integer.
+    #[test]
+    fn mail_capability_accessors_read_the_session_block() {
+        let caps: MailCapabilities = serde_json::from_value(json!({
+            "maxMailboxesPerEmail": null,
+            "maxMailboxDepth": 10,
+            "maxSizeMailboxName": 255,
+            "maxSizeAttachmentsPerEmail": 33554432,
+            "emailQuerySortOptions": [
+                "receivedAt", "size", "subject", "displayTo", "threadId"
+            ],
+            "mayCreateTopLevelMailbox": true
+        }))
+        .unwrap();
+
+        assert_eq!(caps.max_mailboxes_per_email(), None);
+        assert_eq!(caps.max_mailbox_depth(), 10);
+        assert_eq!(caps.max_size_mailbox_name(), 255);
+        assert_eq!(caps.max_size_attachments_per_email(), 33_554_432);
+        assert_eq!(
+            caps.email_query_sort_options(),
+            ["receivedAt", "size", "subject", "displayTo", "threadId"]
+        );
+        assert!(caps.may_create_top_level_mailbox());
+
+        let limited: MailCapabilities = serde_json::from_value(json!({
+            "maxMailboxesPerEmail": 1,
+            "maxMailboxDepth": 1,
+            "maxSizeMailboxName": 30,
+            "maxSizeAttachmentsPerEmail": 1024,
+            "emailQuerySortOptions": [],
+            "mayCreateTopLevelMailbox": false
+        }))
+        .unwrap();
+        assert_eq!(limited.max_mailboxes_per_email(), Some(1));
+        assert!(!limited.may_create_top_level_mailbox());
+        assert!(limited.email_query_sort_options().is_empty());
+    }
+
+    /// RFC 8621 §2 — the `urn:ietf:params:jmap:submission` capability
+    /// block. `submissionExtensions` is an array of strings here, not the
+    /// object RFC 8621 §4.3 also allows (Finding #2).
+    #[test]
+    fn submission_capability_accessors_read_the_session_block() {
+        let caps: SubmissionCapabilities = serde_json::from_value(json!({
+            "maxDelayedSend": 1209600,
+            "submissionExtensions": ["SIZE", "DSN", "UTF8ONLY"]
+        }))
+        .unwrap();
+
+        assert_eq!(caps.max_delayed_send(), 1_209_600);
+        assert_eq!(caps.submission_extensions(), ["SIZE", "DSN", "UTF8ONLY"]);
+
+        let bare: SubmissionCapabilities =
+            serde_json::from_value(json!({ "maxDelayedSend": 0, "submissionExtensions": [] }))
+                .unwrap();
+        assert_eq!(bare.max_delayed_send(), 0);
+        assert!(bare.submission_extensions().is_empty());
+    }
+
+    /// RFC 8621 §4.1 — the `Email/get` argument builders, including the
+    /// default (nothing set serialises to an empty object).
+    #[test]
+    fn get_and_query_argument_builders() {
+        let args = GetArguments::default();
+        assert_eq!(serde_json::to_value(&args).unwrap(), json!({}));
+
+        let mut args = GetArguments::default();
+        args.body_properties([
+            BodyProperty::PartId,
+            BodyProperty::Header(Header::as_text("Content-Type", false)),
+        ])
+        .fetch_text_body_values(true)
+        .fetch_html_body_values(false)
+        .fetch_all_body_values(true)
+        .max_body_value_bytes(4096);
+        assert_eq!(
+            serde_json::to_value(&args).unwrap(),
+            json!({
+                "bodyProperties": ["partId", "header:Content-Type:asText"],
+                "fetchTextBodyValues": true,
+                "fetchHTMLBodyValues": false,
+                "fetchAllBodyValues": true,
+                "maxBodyValueBytes": 4096
+            })
+        );
+
+        let mut query = QueryArguments::default();
+        assert_eq!(serde_json::to_value(&query).unwrap(), json!({}));
+        query.collapse_threads(true);
+        assert_eq!(
+            serde_json::to_value(&query).unwrap(),
+            json!({ "collapseThreads": true })
+        );
+    }
+
+    /// RFC 8621 §2 — both `Email` flavours are account-scoped objects.
+    #[test]
+    fn both_email_flavours_require_an_account_id() {
+        assert!(<Email<Set> as Object>::requires_account_id());
+        assert!(<Email<Get> as Object>::requires_account_id());
+    }
+
+    /// A non-string input makes serde fall back to each visitor's
+    /// `expecting()` text, so the three custom property visitors must name
+    /// what they wanted.
+    #[test]
+    fn visitors_report_what_they_expected_on_a_non_string_input() {
+        let property = serde_json::from_value::<Property>(json!(42))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            property.contains("a valid JMAP e-mail property"),
+            "Property visitor: {property}"
+        );
+
+        let header = serde_json::from_value::<Header>(json!(42))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            header.contains("a valid JMAP header"),
+            "Header visitor: {header}"
+        );
+
+        let body = serde_json::from_value::<BodyProperty>(json!(42))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            body.contains("a valid JMAP body property"),
+            "BodyProperty visitor: {body}"
+        );
+    }
+}

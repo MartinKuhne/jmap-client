@@ -572,11 +572,58 @@ filters/comparators for mailbox / principal / submission / sieve — only the
 All tests are pure: no `MockServer`, no sockets, no `async`. Every fixture is
 RFC-verbatim text with the section cited in its doc comment.
 
-### P9 — Gap closing to ≥ 80%  ⬜
-- [ ] Coverage report analysis; targeted tests for remaining cold spots
-- [ ] Re-run full suite; confirm ≥ 80% line coverage on default features
-- [ ] Confirm `cargo test` (all existing tests) still green
-- [ ] Final ledger reconciliation + commit
+### P9 — Gap closing to ≥ 80%  ✅
+
+The 80% goal was cleared at P7 and pushed to 90.19% by P8, so P9 was read
+off the P8 coverage report as "every `src/` file still under 100% whose
+remaining gap is *pure* logic" — the twelve modules where the integration
+batches had driven the happy path but not the alternate builder arms, the
+`Display` tables, or the serde visitor edges.
+
+- [x] Coverage report analysis — re-measured the P8 end state
+      (**88.84%** regions / **86.57%** functions / **90.19%** lines,
+      8285 lines) by stashing the increment and re-running the same
+      `llvm-cov` command, so every delta below is against a verified
+      baseline rather than a transcribed one. The 12 targets were picked
+      by missed-line count among files with no network dependency;
+      `client.rs` (52 missed) and `client_ws.rs` (59 missed) were left
+      alone as out of scope for in-crate unit tests.
+- [x] Targeted tests for remaining cold spots — 12 files, 115 new
+      `#[cfg(test)] mod tests` unit tests, all appended at end of file:
+      `core/session.rs` (13), `core/set.rs` (19), `email/get.rs` (11),
+      `email/mod.rs` (15), `email/parse.rs` (6), `email/set.rs` (14),
+      `email_submission/set.rs` (7), `mailbox/mod.rs` (7),
+      `mailbox/set.rs` (9), `principal/set.rs` (9), `sieve/get.rs` (3),
+      `sieve/query.rs` (2). No `MockServer`, no sockets, no `async`;
+      every fixture is RFC-verbatim text with the section cited in its
+      doc comment (8620 §5.3/§6.1, 8621 §4.1/§4.1.2/§4.1.3/§4.1.4/§5.2/
+      §6.1, draft-ietf-jmap-sieve-12 §5.1/§5.3/§5.4).
+- [x] Re-run full suite; confirm ≥ 80% line coverage on default features —
+      **96.30%** lines, 16.30 pp above the goal.
+- [x] Confirm `cargo test` (all existing tests) still green — 500 client
+      tests pass (195 lib + 305 integration), 81 `mock-jmap` tests pass,
+      `cargo clippy -p jmap-client --all-targets` emits **zero** warnings
+      in `src/`, and `git diff --numstat` shows **3195 insertions / 0
+      deletions** across the 12 files: no existing non-test line was
+      touched.
+- [x] Final ledger reconciliation + commit — per-file delta below; new
+      contract facts recorded as Findings 90–97.
+
+Six of the twelve targets reached **100.00%** line coverage
+(`email/get.rs`, `email/mod.rs`, `email/parse.rs`, `mailbox/mod.rs`,
+`sieve/get.rs`, `sieve/query.rs`); the other six sit at ≥ 99.00%. The
+residual 11 uncovered lines in the touched files are all structurally
+unreachable in a green run — see the delta table notes and Findings
+94–96.
+
+**Not touched in P9** (still cold, all network-bound or per-method-variant
+and already driven by the integration batches): `client_ws.rs` 69.27%,
+`event_source/parser.rs` 86.98%, `sieve/helpers.rs` 91.05% (17 missed
+lines), `principal/helpers.rs` 96.12%, `email/helpers.rs` 97.74%,
+`core/copy.rs` 78.95%, `core/get.rs` 82.43%, `email/import.rs` 89.01%.
+Closing these needs a transport-level seam, not more unit tests.
+
+All tests are pure: no `MockServer`, no sockets, no `async`.
 
 ## Progress log
 
@@ -591,7 +638,7 @@ RFC-verbatim text with the section cited in its doc comment.
 | 6 | 2026-10-28 | P5: submission / identity / vacation wiremock integration tests — `tests/email_submission.rs` (27), `tests/identity.rs` (22), `tests/vacation_response.rs` (18). Drives every `Client::email_submission_*` / `Client::identity_*` / `Client::vacation_response_*` helper plus the matching `Request::` builders and `unwrap_*` accessors against RFC-verbatim 8621 §6/§7/§8 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **59.14%** lines (6953 instr., 4112 covered) — **+12.83 pp / +892 lines** over P4's 46.31% | **212 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green (212), `cargo test -p mock-jmap` green (80), `cargo clippy -p jmap-client --all-targets` clean for `tests/` (all 7 warnings are the pre-existing `mock-jmap` lib ones — none in `src/` or `tests/`), coverage summary lists only `src/` rows. All 13 target modules went from 0.00%; `email_submission/query.rs` and `vacation_response/get.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 53–65. |
 | 7 | 2026-10-29 | P6: sieve / principal / push_subscription / blob wiremock integration tests — `tests/principal.rs` (25), `tests/sieve.rs` (22), `tests/push_subscription.rs` (15), `tests/blob.rs` (12). Drives every `Client::sieve_script_*` / `Client::principal_*` / `Client::push_subscription_*` helper plus `Client::{upload,download,blob_copy}`, the matching `Request::` builders and `unwrap_*` accessors, against RFC 8620 §6.1–§6.3/§7.2, draft-ietf-jmap-sieve-12 §2 and RFC 9670 §4 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **75.64%** lines (6953 instr., 5259 covered) — **+16.50 pp / +1147 lines** over P5's 59.14% | **286 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 new) · mock-jmap 41 P2 + 35 P1 + 4 doctests pass, 1 known flake | Verified: `cargo test -p jmap-client` green (286), `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` lists only `src/` rows, `cargo test -p mock-jmap` green apart from the pre-existing WS-handshake flake of the P3-followup box (Finding #77). 18 of the 20 target modules went from 0.00%; `blob/copy.rs` and `sieve/validate.rs` reached 100%. No `src/` file was modified. Regions 56.93% → 73.14%, functions 57.85% → 73.97%. New contract facts recorded as Findings 66–77. The flake reproduces at the same rate with and without the P6 files (4/9 vs 2/5 full-suite runs), confirming it is independent of this increment. |
 | 8 | 2026-10-29 | P7: push-stream integration tests — `tests/websocket.rs` (15) + `tests/event_source.rs` (11), plus the P3-followup fix of the mock's WS-handshake write. Drives `Client::{connect_ws,send_ws,enable_push_ws,disable_push_ws,ws_ping,event_source}` and the RFC 8887 `WebSocketMessage` / RFC 8620 §7.3 `PushNotification`+`Changes` surfaces against the mock's own WebSocket and SSE legs: requestId correlation, `dataTypes`/`types=` filtering, `closeafter=state`, `ping` keepalive, `Last-Event-ID`/`pushState` resume, `EmailPush` delivery over WS only, `RequestError`→`ProblemDetails` vs a method error, and the not-connected error set. | **80.25%** lines (6953 instr., 5580 covered) — **+4.61 pp / +321 lines** over P6's 75.64% | **312 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 new) · mock-jmap 41 P2 + 35 P1 + 1 lib + 4 doctests pass, **0 flakes** | Verified: `cargo test -p jmap-client` green ×3 (312), `cargo test -p mock-jmap` green ×5 on top of the 8 post-fix runs (13 total, 0 flakes), `cargo clippy -p jmap-client --all-targets` clean for the two new files, coverage summary lists only `src/` rows. `event_source/stream.rs` reached **100.00%**, `event_source/mod.rs` 16.67% → **97.22%**, `client_ws.rs` 0.00% → **69.27%**, `event_source/parser.rs` 71.35% → **86.98%**. Regions 73.14% → 76.80%, functions 73.97% → 76.86%. No `src/` file was modified; `mock-jmap/` was (allowed: the flake fix + keepalive/`query` observability hooks). The P3-followup box is closed — see Findings #78/#79. New contract facts recorded as Findings 78–84. |
-| 9 | 2026-10-29 | P8: in-crate `#[cfg(test)] mod tests` unit sweep of the cold *pure* logic — `core/response.rs` (32 tests), `email/query.rs` (5), `lib.rs` (10), `core/error.rs` (8), `core/mod.rs` (1). No server, no sockets, no async: RFC-verbatim fixtures (8620 §3.4/§3.6.1.1, 8621 §4.4.1/§4.4.2) deserialised in place. Drives the whole `unwrap_*` accessor family through both its method-error and its type-mismatch arm via one macro, and every `visit_seq` guard by walking all 40 `Method` variants against a payload-less envelope. | **90.19%** lines (8285 instr., 7472 covered) — **+9.94 pp / +1892 lines** over P7's 80.25% | **385 client pass** (80 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 73 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (385), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in the five target files (the remaining ones are pre-existing in `mock-jmap` and `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Four of the five targets are now ≥ 99.58%; `email/query.rs`, `lib.rs` and `core/mod.rs` are at **100.00%**. Regions 76.80% → 88.84%, functions 76.86% → 86.57%. Diff is **insertions only** (2639 added, 0 deleted) — no existing non-test line was touched. New contract facts recorded as Findings 85–89. |
+| 10 | 2026-10-29 | P9: in-crate `#[cfg(test)] mod tests` sweep of the remaining cold *pure* logic — 12 files / 115 tests: `core/set.rs` (19), `core/session.rs` (13), `email/mod.rs` (15), `email/set.rs` (14), `email/get.rs` (11), `principal/set.rs` (9), `mailbox/set.rs` (9), `email_submission/set.rs` (7), `mailbox/mod.rs` (7), `email/parse.rs` (6), `sieve/get.rs` (3), `sieve/query.rs` (2). Drives the generic `SetRequest` create/update/destroy bookkeeping and the whole `SetErrorType` table, the `Email`/`Mailbox`/`Principal`/`EmailSubmission` patch builders and their dotted-path forms, the `take_*` draining accessors, and the three custom serde property visitors — against RFC-verbatim fixtures. Baseline re-measured by stashing the increment and re-running the same `llvm-cov` command. | **96.30%** lines (10254 instr., 9875 covered) — **+6.11 pp / +2403 lines** over P8's 90.19% | **500 client pass** (195 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 115 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (500), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in `src/` (the remaining ones are the 7 pre-existing `mock-jmap` lib warnings plus 5 pre-existing in `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Regions 88.84% → **95.64%**, functions 86.57% → **93.74%**. Diff is **insertions only** (3195 added, 0 deleted). Six of the twelve targets reached **100.00%**; the other six are ≥ 99.00%. New contract facts recorded as Findings 90–97. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -865,6 +912,58 @@ Two earlier unreachable lines were **eliminated** rather than documented: the
 `match … => panic!("must deserialise as the … arm")` guards, which can never
 execute in a passing run. Rewriting those as guarded `matches!` expressions
 asserts the same field values with no unreachable branch.
+
+#### P9 per-file line-coverage delta
+
+Against the P8 end state, re-measured with the increment stashed
+(`88.84%` regions / `86.57%` functions / **90.19%** lines, 8285 instr.,
+7472 covered). As in P8, the instrumented total grows (8285 → 10254)
+because the in-crate `mod tests` blocks are themselves `src/` code; the
+per-file percentages are the honest signal.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `principal/set.rs` | 68.75% | **99.18%** | +30.43 | 77 → 241 (+164) |
+| `mailbox/set.rs` | 68.89% | **99.00%** | +30.11 | 62 → 198 (+136) |
+| `core/session.rs` | 70.72% | **99.52%** | +28.80 | 128 → 413 (+285) |
+| `mailbox/mod.rs` | 73.68% | **100.00%** | +26.32 | 42 → 163 (+121) |
+| `email/mod.rs` | 74.51% | **100.00%** | +25.49 | 228 → 628 (+400) |
+| `email/get.rs` | 76.44% | **100.00%** | +23.56 | 159 → 504 (+345) |
+| `email/parse.rs` | 76.62% | **100.00%** | +23.38 | 59 → 154 (+95) |
+| `email/set.rs` | 76.37% | **99.65%** | +23.28 | 265 → 567 (+302) |
+| `sieve/query.rs` | 78.57% | **100.00%** | +21.43 | 11 → 49 (+38) |
+| `email_submission/set.rs` | 78.29% | **99.11%** | +20.82 | 101 → 223 (+122) |
+| `sieve/get.rs` | 80.00% | **100.00%** | +20.00 | 12 → 40 (+28) |
+| `core/set.rs` | 79.78% | **99.66%** | +19.88 | 213 → 580 (+367) |
+| **TOTAL** | **90.19%** | **96.30%** | **+6.11** | **7472 → 9875 (+2403)** |
+
+Regions 88.84% → **95.64%** (+6.80) and functions 86.57% → **93.74%**
+(+7.17) over the same increment. Every one of the twelve files moved by
+almost 20 pp or more, and six of them closed to 100.00%.
+
+**Lines that cannot be reached.** `--show-missing-lines` lists **11** lines
+across the twelve touched files, none of them untested logic:
+
+- `email/set.rs:252-253`, `email_submission/set.rs:71-72`,
+  `mailbox/set.rs:116-117`, `principal/set.rs:142-143` — `SetObject::new()`
+  for the `<Get>` flavour is a literal `unimplemented!()`. Reaching it means
+  panicking, which fails the run (Finding #94).
+- `core/session.rs:499` — the `Ok(..) => panic!(..)` arm of the test
+  module's own `parse_err` helper; taken only if a URL that must not parse
+  actually does.
+- `core/session.rs:521` — the never-taken continuation of a multi-line
+  `matches!` assertion inside the test module (the same macro-attribution
+  artefact recorded for P8).
+- `core/set.rs:403` — the `?` error-propagation path of the multi-line
+  `write!` in `Display for SetError`; a `Formatter` over a `String` never
+  returns `fmt::Error`.
+
+Two previously-cold lines were **eliminated** rather than documented during
+the pass: `SetObject::set_id`'s default no-op body (`core/set.rs:25`), now
+driven by `the_default_set_id_is_a_noop`, and the three `Visitor::expecting`
+bodies in `email/mod.rs` plus both `requires_account_id` arms in
+`email/mod.rs` and `mailbox/mod.rs`, which needed a *type*-mismatched input
+rather than an unknown string (Finding #95).
 
 ## Findings log
 
@@ -1489,3 +1588,64 @@ _Discovered writing the P8 in-crate unit tests against `core/response.rs`,
     `"WebSocket protocol error: "` stacked. Any code that tries to strip or
     match the prefix has to account for both. Pinned by the
     `from_tungstenite_error_wraps_as_websocket_error` unit test.
+
+90. **`Role::deserialize` reads a *borrowed* `&str`, so `from_value` cannot
+    produce one.** `serde_json::from_value::<Role>(json!("inbox"))` fails with
+    `invalid type: string "inbox", expected a borrowed string`, because the
+    visitor calls `visit_str` against a `&'de str` lifetime that a `Value`
+    cannot supply. Every `Role` fixture must go through
+    `serde_json::from_str`. This bites hardest inside a larger record: a
+    `Mailbox/set` response containing `"role": "inbox"` fails to
+    deserialise wholesale under `from_value`, with the error pointing at the
+    outer `.unwrap()` rather than the `role` member.
+91. **`serde_json::from_str` appends a position suffix to custom visitor
+    errors; `from_value` does not.** The same `Property` visitor rejection
+    renders as `"unknown property"` from `from_value` but
+    `"unknown property at line 1 column 14"` from `from_str`. Tests that
+    assert on the exact message must pick one loader and stick to it; the
+    P9 modules use `from_value` for custom-error assertions and reserve
+    `from_str` for the `Role` case of Finding #90.
+92. **`myRights` is modelled as the `mayXxx` object, not the RFC 8621 §7.1
+    letter array.** RFC 8621 §7.1 spells rights as
+    `["a","w","i","r","p","o"]`, but `MailboxRights` is a struct of nine
+    `mayReadItems` / `mayAddItems` / … booleans. Feeding the RFC's array
+    form fails with `invalid type: string "a", expected a boolean`. The
+    `SetResponse<Mailbox<Get>>` fixture in `core/set.rs` therefore uses the
+    object form and says so in its doc comment.
+93. **`Address`, `EmailAddress` and `EmailAddressGroup` have no
+    `skip_serializing_if` on their optional members.** An address with no
+    display name serialises as `{"name": null, "email": "…"}`, and a
+    submission `Address` always carries `"parameters": null`. RFC 8621
+    §4.1 / §6.1 treat those members as absent, not null. Any fixture
+    comparing whole serialised objects has to expect the explicit `null`,
+    and a server that omits them will not round-trip byte-for-byte.
+94. **`SetObject::new()` is `unimplemented!()` for every `<Get>` flavour.**
+    `Email<Get>`, `EmailSubmission<Get>`, `Mailbox<Get>` and
+    `Principal<Get>` each carry a `fn new(_) { unimplemented!() }` arm
+    (two lines apiece, eight total) that no green run can reach: calling it
+    panics, and nothing in the generic `SetRequest` machinery ever asks a
+    `<Get>` object to construct itself. The `<Get>` records the tests need
+    are built with `serde_json::from_value` instead.
+95. **`Visitor::expecting()` is reached only by a *type*-mismatched input,
+    never by an unknown string.** Feeding `"x-vendor-property"` to
+    `Property`'s visitor goes through `visit_str` and returns the crate's
+    own error; `expecting()` is never called. Feeding `json!(42)` makes
+    serde fall back to `expecting()` to build
+    `"invalid type: integer \`42\`, expected a valid JMAP e-mail property"`.
+    Covering the three visitors in `email/mod.rs` needed the numeric input,
+    which also pins the human-readable text each one promises.
+96. **`from_timestamp` silently maps out-of-range input to the Unix epoch.**
+    `DateTime::from_timestamp(ts, 0).unwrap_or_default()` means
+    `from_timestamp(i64::MAX)` returns `1970-01-01T00:00:00Z` rather than
+    an error, and `date_not_set` then reports that value as "not set". A
+    caller passing a garbage timestamp gets the epoch, and a caller clearing
+    a date by passing `0` is indistinguishable from one passing a real
+    epoch value.
+97. **`SetObject::set_id`'s default is a no-op, and the `<Get>` flavours
+    inherit it.** Only the `<Set>` types override `set_id`; `Mailbox<Get>`
+    and friends take the trait's `fn set_id(&mut self, _id) {}`, so writing
+    an id back to a fetched record is silently dropped. That is the correct
+    behaviour for a non-patch type, but it means `set_id` is not a uniform
+    "assign the id" operation across the trait — a generic helper cannot
+    rely on it.
+

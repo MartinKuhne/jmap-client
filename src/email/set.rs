@@ -456,3 +456,335 @@ impl EmailHeader {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `Email<Set>` patch builders (RFC 8621 §5.2 on
+    //! top of RFC 8620 §5.3), the `EmailBodyPart` value builder, and the
+    //! `From` conversions that let callers write addresses and body
+    //! values without naming the types. No server, no socket, no async.
+
+    use super::*;
+    use crate::core::set::SetObject;
+    use crate::email::HeaderForm;
+    use crate::Method;
+    use serde_json::json;
+
+    fn fresh() -> Email<Set> {
+        Email::<Set>::new(None)
+    }
+
+    /// An untouched patch contributes nothing to the request body.
+    #[test]
+    fn a_fresh_email_patch_serialises_as_an_empty_object() {
+        assert_eq!(serde_json::to_value(fresh()).unwrap(), json!({}));
+        assert_eq!(
+            serde_json::to_value(Email::<Set>::new(Some(3))).unwrap(),
+            json!({})
+        );
+    }
+
+    /// RFC 8620 §5.3 — a single-mailbox / single-keyword change is sent as
+    /// a dotted path inside the patch, never as a whole-value member.
+    #[test]
+    fn mailbox_id_and_keyword_write_dotted_patch_paths() {
+        let mut email = fresh();
+        email.mailbox_id("mb-1", true).keyword("$seen", true);
+        email.keyword("$junk", false);
+
+        assert_eq!(
+            serde_json::to_value(&email).unwrap(),
+            json!({
+                "mailboxIds/mb-1": true,
+                "keywords/$seen": true,
+                "keywords/$junk": false
+            })
+        );
+        // The dotted form and the whole-value form never coexist.
+        assert!(email.mailbox_ids.is_none());
+        assert!(email.keywords.is_none());
+    }
+
+    /// RFC 8621 §5.2 — `mailboxIds` may be given as a whole value or as a
+    /// result reference; each form clears the other.
+    #[test]
+    fn whole_value_mailbox_ids_and_the_reference_are_exclusive() {
+        let mut email = fresh();
+        email.mailbox_ids(["mb-1", "mb-2"]);
+        let value = serde_json::to_value(&email).unwrap();
+        let mut ids = value["mailboxIds"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<Vec<_>>();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            ids,
+            vec![
+                ("mb-1".to_string(), json!(true)),
+                ("mb-2".to_string(), json!(true))
+            ]
+        );
+        assert!(email.mailbox_ids_ref.is_none());
+
+        email.mailbox_ids_ref(ResultReference::new(Method::QueryMailbox, 1, "/ids"));
+        let value = serde_json::to_value(&email).unwrap();
+        assert!(value.get("mailboxIds").is_none());
+        assert_eq!(
+            value["#mailboxIds"],
+            json!({ "resultOf": "s1", "name": "Mailbox/query", "path": "/ids" })
+        );
+
+        email.mailbox_ids(["mb-3"]);
+        assert!(serde_json::to_value(&email)
+            .unwrap()
+            .get("#mailboxIds")
+            .is_none());
+    }
+
+    /// RFC 8621 §5.2 — the scalar and message-id-list builders land under
+    /// their own wire names.
+    #[test]
+    fn scalar_and_list_builders_land_under_their_wire_names() {
+        let mut email = fresh();
+        email
+            .subject("Hello, World!")
+            .sent_at(1_720_000_000)
+            .received_at(1_720_000_001)
+            .message_id(["<abc123@example.com>"])
+            .in_reply_to(["<other@example.com>"])
+            .references(["<a@example.com>", "<b@example.com>"]);
+
+        assert_eq!(
+            serde_json::to_value(&email).unwrap(),
+            json!({
+                "subject": "Hello, World!",
+                "sentAt": "2024-07-03T09:46:40Z",
+                "receivedAt": "2024-07-03T09:46:41Z",
+                "messageId": ["<abc123@example.com>"],
+                "inReplyTo": ["<other@example.com>"],
+                "references": ["<a@example.com>", "<b@example.com>"]
+            })
+        );
+    }
+
+    /// Every address-list builder accepts the `EmailAddress` `From` shapes,
+    /// so callers can mix bare addresses and named ones without naming the
+    /// type.
+    #[test]
+    fn address_list_builders_accept_every_from_shape() {
+        let mut email = fresh();
+        email
+            .sender([EmailAddress::from("sender@example.com")])
+            .from([EmailAddress::from((
+                "From Name".to_string(),
+                "from@example.com".to_string(),
+            ))])
+            .to([
+                EmailAddress::from(("Alice".to_string(), "alice@example.com".to_string())),
+                EmailAddress::from(("Bob", "bob@example.com")),
+                EmailAddress::from("bare@example.com"),
+            ])
+            .cc(["cc@example.com"])
+            .bcc([String::from("bcc@example.com")])
+            .reply_to([("Reply", "reply@example.com")]);
+
+        let value = serde_json::to_value(&email).unwrap();
+        assert_eq!(
+            value["sender"],
+            json!([{ "name": null, "email": "sender@example.com" }])
+        );
+        assert_eq!(
+            value["from"],
+            json!([{ "name": "From Name", "email": "from@example.com" }])
+        );
+        assert_eq!(
+            value["to"],
+            json!([
+                { "name": "Alice", "email": "alice@example.com" },
+                { "name": "Bob", "email": "bob@example.com" },
+                { "name": null, "email": "bare@example.com" }
+            ])
+        );
+        assert_eq!(
+            value["cc"],
+            json!([{ "name": null, "email": "cc@example.com" }])
+        );
+        assert_eq!(
+            value["bcc"],
+            json!([{ "name": null, "email": "bcc@example.com" }])
+        );
+        assert_eq!(
+            value["replyTo"],
+            json!([{ "name": "Reply", "email": "reply@example.com" }])
+        );
+    }
+
+    /// RFC 8621 §5.2 — `bodyValues` is keyed by part id and accepts both
+    /// owned and borrowed text.
+    #[test]
+    fn body_values_are_keyed_by_part_id() {
+        let mut email = fresh();
+        email
+            .body_value("1".to_string(), "plain text")
+            .body_value("2".to_string(), String::from("html text"));
+
+        let value = serde_json::to_value(&email).unwrap();
+        assert_eq!(
+            value["bodyValues"],
+            json!({
+                "1": { "value": "plain text" },
+                "2": { "value": "html text" }
+            })
+        );
+    }
+
+    /// The `EmailBodyPart` builder produces the RFC 8621 §4.1.4 member
+    /// names, and a `<Set>` part converts into the `<Get>` slot the
+    /// whole-value builders expect.
+    #[test]
+    fn body_part_builder_produces_the_rfc_member_names() {
+        let part = EmailBodyPart::new()
+            .part_id("2")
+            .blob_id("c2f9ff3a-123e-1234-80a1-371358b4bce8")
+            .name("attachment.png")
+            .content_type("image/png")
+            .content_id("c2f9ff3a-123e-1234-80a1-371358b4bce8")
+            .content_language(["en"])
+            .content_location("https://example.com/attachment.png")
+            .sub_part(
+                EmailBodyPart::new()
+                    .part_id("2.1")
+                    .content_type("text/plain")
+                    .into(),
+            );
+
+        assert_eq!(
+            serde_json::to_value(&part).unwrap(),
+            json!({
+                "partId": "2",
+                "blobId": "c2f9ff3a-123e-1234-80a1-371358b4bce8",
+                "name": "attachment.png",
+                "type": "image/png",
+                "cid": "c2f9ff3a-123e-1234-80a1-371358b4bce8",
+                "language": ["en"],
+                "location": "https://example.com/attachment.png",
+                "subParts": [
+                    { "partId": "2.1", "type": "text/plain" }
+                ]
+            })
+        );
+    }
+
+    /// The three list-shaped body builders append rather than replace.
+    #[test]
+    fn body_list_builders_append() {
+        let mut email = fresh();
+        email
+            .body_structure(EmailBodyPart::new().content_type("multipart/mixed").into())
+            .text_body(EmailBodyPart::new().part_id("1").content_type("text/plain"))
+            .text_body(EmailBodyPart::new().part_id("2").content_type("text/html"))
+            .attachment(EmailBodyPart::new().name("file.png"));
+
+        let value = serde_json::to_value(&email).unwrap();
+        assert_eq!(value["bodyStructure"]["type"], json!("multipart/mixed"));
+        assert_eq!(value["textBody"].as_array().unwrap().len(), 2);
+        assert_eq!(value["textBody"][0]["partId"], json!("1"));
+        assert_eq!(value["textBody"][1]["partId"], json!("2"));
+        assert_eq!(value["attachments"][0]["name"], json!("file.png"));
+    }
+
+    /// The flattened `header:<name>:as<Form>` arm of the record is written
+    /// through `header()`.
+    #[test]
+    fn header_builder_writes_the_flattened_header_map() {
+        let mut email = fresh();
+        email.header(
+            Header {
+                name: "X-Mailing-List".to_string(),
+                form: HeaderForm::Text,
+                all: false,
+            },
+            HeaderValue::AsText("list@example.com".to_string()),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&email).unwrap(),
+            json!({ "header:X-Mailing-List:asText": "list@example.com" })
+        );
+    }
+
+    /// RFC 8621 §4.1 — a grouped address is built up one member at a time.
+    #[test]
+    fn email_address_group_builder() {
+        let group = EmailAddressGroup::new()
+            .name("Team")
+            .address(EmailAddress::from(("Alice", "alice@example.com")))
+            .address("bob@example.com");
+
+        assert_eq!(
+            serde_json::to_value(&group).unwrap(),
+            json!({
+                "name": "Team",
+                "addresses": [
+                    { "name": "Alice", "email": "alice@example.com" },
+                    { "name": null, "email": "bob@example.com" }
+                ]
+            })
+        );
+    }
+
+    /// A body-part header entry is a plain name/value pair.
+    #[test]
+    fn email_header_new_is_a_plain_pair() {
+        let header = EmailHeader::new("Content-Type".to_string(), "image/png".to_string());
+        assert_eq!(header.name, "Content-Type");
+        assert_eq!(header.value, "image/png");
+    }
+
+    /// The named constructor is the `<Set>` flavour: `new` takes the
+    /// address, `.name` adds the display name.
+    #[test]
+    fn email_address_new_then_name() {
+        assert_eq!(
+            serde_json::to_value(
+                EmailAddress::new("alice@example.com".to_string()).name("Alice".to_string())
+            )
+            .unwrap(),
+            json!({ "name": "Alice", "email": "alice@example.com" })
+        );
+        assert_eq!(
+            serde_json::to_value(EmailAddress::new("bob@example.com".to_string())).unwrap(),
+            json!({ "name": null, "email": "bob@example.com" })
+        );
+    }
+
+    /// RFC 8620 §5.3 — the create id is `c<n>`, and `set_id` writes the
+    /// real id back once the server has answered.
+    #[test]
+    fn create_id_and_set_id() {
+        assert_eq!(Email::<Set>::new(None).create_id(), None);
+        assert_eq!(
+            Email::<Set>::new(Some(0)).create_id(),
+            Some("c0".to_string())
+        );
+        assert_eq!(
+            Email::<Set>::new(Some(12)).create_id(),
+            Some("c12".to_string())
+        );
+
+        let mut email = Email::<Set>::new(Some(1));
+        email.set_id(Some("M8504".to_string()));
+        assert_eq!(email.id, Some("M8504".to_string()));
+        email.set_id(None);
+        assert!(email.id.is_none());
+    }
+
+    /// The `<Get>` flavour can never report a create id: it is not a patch.
+    #[test]
+    fn a_get_flavoured_email_never_reports_a_create_id() {
+        let email: Email<Get> = serde_json::from_value(json!({ "id": "M8504" })).unwrap();
+        assert_eq!(email.create_id(), None);
+    }
+}

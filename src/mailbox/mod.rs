@@ -295,3 +295,185 @@ impl Serialize for Role {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the mailbox property enum, the `Role` wire mapping
+    //! and the `*_not_set` serialisation guards (RFC 8621 §2.1/§2.2).
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §2.1 — every `Property` variant's wire name, and which
+    /// of them `is_count()` reports as counters.
+    #[test]
+    fn property_display_serde_and_is_count() {
+        let cases: &[(Property, &str, bool)] = &[
+            (Property::Id, "id", false),
+            (Property::Name, "name", false),
+            (Property::ParentId, "parentId", false),
+            (Property::Role, "role", false),
+            (Property::SortOrder, "sortOrder", false),
+            (Property::TotalEmails, "totalEmails", true),
+            (Property::UnreadEmails, "unreadEmails", true),
+            (Property::TotalThreads, "totalThreads", true),
+            (Property::UnreadThreads, "unreadThreads", true),
+            (Property::MyRights, "myRights", false),
+            (Property::IsSubscribed, "isSubscribed", false),
+            (Property::ShareWith, "shareWith", false),
+        ];
+
+        assert_eq!(cases.len(), 12, "twelve mailbox properties");
+        for (property, wire, is_count) in cases {
+            assert_eq!(property.to_string(), *wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(property).unwrap(), json!(*wire));
+            assert_eq!(
+                serde_json::from_value::<Property>(json!(*wire)).unwrap(),
+                *property
+            );
+            assert_eq!(property.is_count(), *is_count, "{property:?} is_count");
+        }
+    }
+
+    /// RFC 8621 §2.1 — the role is matched case-insensitively, so a
+    /// server that spells it `INBOX` or `InBoX` still lands on
+    /// `Role::Inbox`.
+    ///
+    /// Note the source has to be borrowed text: `Role`'s `Deserialize` impl
+    /// reads a `&str`, so `from_value` (which owns its string) fails with
+    /// "expected a borrowed string" — see Finding #90.
+    #[test]
+    fn role_deserialises_case_insensitively() {
+        let cases: &[(&str, Role)] = &[
+            ("inbox", Role::Inbox),
+            ("INBOX", Role::Inbox),
+            ("InBoX", Role::Inbox),
+            ("sent", Role::Sent),
+            ("SENT", Role::Sent),
+            ("trash", Role::Trash),
+            ("Trash", Role::Trash),
+            ("drafts", Role::Drafts),
+            ("DRAFTS", Role::Drafts),
+            ("junk", Role::Junk),
+            ("Junk", Role::Junk),
+            ("archive", Role::Archive),
+            ("ARCHIVE", Role::Archive),
+            ("important", Role::Important),
+            ("Important", Role::Important),
+        ];
+
+        for (wire, role) in cases {
+            let json = format!("\"{wire}\"");
+            assert_eq!(
+                serde_json::from_str::<Role>(&json).unwrap(),
+                *role,
+                "{wire} must deserialise to {role:?}"
+            );
+        }
+
+        assert_eq!(
+            serde_json::from_str::<Role>(r#""Reports""#).unwrap(),
+            Role::Other("reports".to_string()),
+            "an unknown role becomes `Other` carrying the lower-cased string"
+        );
+        assert_eq!(
+            serde_json::from_str::<Role>(r#""""#).unwrap(),
+            Role::Other(String::new())
+        );
+        assert!(
+            serde_json::from_value::<Role>(json!("inbox")).is_err(),
+            "an owned string cannot back a `&str` deserialise"
+        );
+    }
+
+    /// RFC 8621 §2.1 — each role serialises to its canonical lower-case
+    /// name, and `Role::None` serialises to the empty string.
+    #[test]
+    fn role_serialises_to_its_canonical_name() {
+        let cases: &[(Role, &str)] = &[
+            (Role::Inbox, "inbox"),
+            (Role::Sent, "sent"),
+            (Role::Trash, "trash"),
+            (Role::Drafts, "drafts"),
+            (Role::Junk, "junk"),
+            (Role::Archive, "archive"),
+            (Role::Important, "important"),
+            (Role::Other("custom".to_string()), "custom"),
+            (Role::None, ""),
+        ];
+
+        for (role, wire) in cases {
+            assert_eq!(
+                serde_json::to_value(role).unwrap(),
+                json!(*wire),
+                "{role:?} must serialise as {wire}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(Role::default()).unwrap(),
+            json!(""),
+            "the default role is `None`, which writes the empty string"
+        );
+    }
+
+    /// The `Role` mapping is deliberately lossy: `Other("inbox")` writes
+    /// `"inbox"` and reads back as `Role::Inbox`, never as `Other`.
+    #[test]
+    fn role_other_is_lossy_towards_a_known_role_name() {
+        let wire = serde_json::to_string(&Role::Other("inbox".to_string())).unwrap();
+        assert_eq!(wire, "\"inbox\"");
+        assert_eq!(
+            serde_json::from_str::<Role>(&wire).unwrap(),
+            Role::Inbox,
+            "reading it back resolves the known name, not `Other`"
+        );
+    }
+
+    /// RFC 8621 §2.2 — `Mailbox/changes` carries `updatedProperties`,
+    /// the one member the mail changes response adds to the core shape.
+    #[test]
+    fn changes_response_reports_updated_properties() {
+        let response: ChangesResponse = serde_json::from_value(json!({
+            "updatedProperties": ["totalEmails", "unreadEmails", "name"]
+        }))
+        .unwrap();
+        assert_eq!(
+            response.updated_properties().unwrap(),
+            [
+                Property::TotalEmails,
+                Property::UnreadEmails,
+                Property::Name
+            ]
+        );
+
+        let empty: ChangesResponse = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.updated_properties().is_none());
+    }
+
+    /// The `*_not_set` guards are what keep a fresh `Mailbox<Set>` from
+    /// writing a member at all — and why an explicitly cleared member
+    /// rides the wire as `null` instead (Finding #39).
+    #[test]
+    fn the_not_set_guards_suppress_only_the_seeds() {
+        assert!(role_not_set(&Some(Role::None)));
+        assert!(!role_not_set(&Some(Role::Inbox)));
+        assert!(!role_not_set(&None), "a cleared role is not 'not set'");
+
+        assert!(string_not_set(&Some(String::new())));
+        assert!(!string_not_set(&Some("Inbox".to_string())));
+        assert!(!string_not_set(&None));
+
+        assert!(map_not_set(&Some(AHashMap::<String, String>::new())));
+        let mut filled = AHashMap::new();
+        filled.insert("alice@example.com".to_string(), true);
+        assert!(!map_not_set(&Some(filled)));
+        assert!(!map_not_set::<String, bool>(&None));
+    }
+
+    /// RFC 8621 §2 — both `Mailbox` flavours are account-scoped objects.
+    #[test]
+    fn both_mailbox_flavours_require_an_account_id() {
+        assert!(<Mailbox<Set> as Object>::requires_account_id());
+        assert!(<Mailbox<Get> as Object>::requires_account_id());
+    }
+}
