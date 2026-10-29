@@ -212,12 +212,48 @@ socket is ordered, so the enable has been handled. `p2_streams.rs` wraps this as
 pattern. SSE needs no such handshake: the stream is live the moment the 200
 arrives, and `wait_for_subscribers(handle, n)` makes that observable.
 
-### P3 — Integration tests: core  ⬜
-- [ ] tests/core_methods.rs: session fetch, multi-method requests, references,
+#### Wiremock fixture API (for P3–P6)
+
+`tests/common/mod.rs` is the shared HTTP fixture layer. Every P3–P6 test binary
+includes it with `mod common;`; unused helpers are allowed
+(`#![allow(dead_code)]`), so each phase adds only what it mounts.
+
+| Helper | Purpose |
+|---|---|
+| `ACCOUNT_ID` / `USERNAME` / `SESSION_STATE` / `API_PATH` / `SESSION_PATH` | the constants every fixture and assertion shares (`u33084183`, `test@example.org`, `75128aab4b1b`, `/jmap`, `/.well-known/jmap`) |
+| `DEFAULT_CAPABILITIES` | the URIs the default session advertises — **sieve deliberately absent** so filtering is observable |
+| `session_json(server)` / `session_json_with_sieve(server)` | the Session resource body, with and without `urn:ietf:params:jmap:sieve` |
+| `mount_session` / `mount_session_json` / `mount_session_template` | answer `GET /.well-known/jmap` (template variant serves a 401 problem where the session should be) |
+| `mount_sieve_session` | answer with the sieve-advertising session |
+| `connected_client(server)` / `connected_client_json(server, session)` | mount a session **and** run `Client::new().credentials((USERNAME,"secret")).connect()` |
+| `jmap_response(method_responses, session_state)` | `200 application/json` `{"methodResponses":[…],"sessionState":"…"}` |
+| `jmap_response_with_created_ids(…, created_ids, …)` | the same plus the optional `createdIds` member |
+| `problem_response(status, body)` | RFC 7807 body with content type `application/problem+json` and **no** `; charset=utf-8` (Finding 7) |
+| `mount_jmap(server, template)` / `mount_jmap_scoped(server, template) -> MockGuard` | answer `POST /jmap` for the server's life / until the guard drops |
+| `request_bodies` / `single_request_body` | spy on every recorded request body (single variant asserts exactly one) |
+| `jmap_request_bodies` / `single_jmap_request` | spy on `POST /jmap` only — use once the session GET would shift indices |
+| `expected_basic_auth(user, pass)` | the exact `Authorization` value the client builds for Basic auth |
+
+A method response fixture is an **Invocation**, `["Name", {args}, "callId"]`
+(RFC 8620 §3.2). `tests/core_methods.rs` wraps bodies with a local `inv()` and
+`method_error()`; P4–P6 should do the same rather than passing a bare arguments
+object — `TaggedMethodResponse` deserialises from the array, never the object.
+
+**Hermeticity rule:** each test owns its `MockServer::start()` and mounts only
+what it needs. An unmatched request gets wiremock's 404, which surfaces as
+`jmap_client::Error::Server` — a loud failure instead of a hang.
+
+### P3 — Integration tests: core  🟨 (core_methods.rs landed; changes_query.rs open)
+- [x] tests/core_methods.rs: session fetch, multi-method requests, references,
       createdIds, capability filtering, error paths (401, problem+json,
-      method error, couldNotParseJson)
+      method error, couldNotParseJson) — **28 tests**, wiremock-backed, plus the
+      shared fixture module `tests/common/mod.rs` (see “Wiremock fixture API”
+      above). Note: the plan named `couldNotParseJson`; per Finding 1 the
+      client-side counterpart of a malformed body is `Error::Parse`, which is
+      what is asserted.
 - [ ] tests/changes_query.rs: changes/query/queryChanges across types
-- [ ] Verify + commit
+- [x] Verify + commit — *this increment* (core_methods.rs only); P3 is not
+      closed until `changes_query.rs` lands.
 
 ### P4 — Integration tests: mail domain  ⬜
 - [ ] tests/mailbox.rs: get/set/create/destroy/update/query + helpers
@@ -265,6 +301,35 @@ arrives, and `wait_for_subscribers(handle, n)` makes that observable.
 | 0 | 2026-10-28 | Baseline | 6.04% | 9 pass | pre-existing state |
 | 1 | 2026-10-28 | P1: `mock-jmap` workspace crate (HTTP core + session + full method registry + blob upload/download) | 6.04% (unchanged) | 9 client pass · 35 mock self-tests pass · 2 mock doctests pass | `cargo check -p mock-jmap`, `cargo test -p mock-jmap`, `cargo test -p jmap-client` all green. Coverage unchanged by design: P1 adds the mock, not client-facing tests; the mock crate is excluded from the metric. Deviations recorded below. |
 | 2 | 2026-10-28 | P2: `mock-jmap` EventSource (SSE) + RFC 8887 WebSocket legs, `PushBus` push model, mock control API for driving pushes against open streams | 6.04% (unchanged) | 9 client pass · 41 P2 stream tests pass · 35 P1 mock self-tests pass · 4 mock doctests pass | `cargo test -p mock-jmap`, `cargo test -p jmap-client`, `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` all green; the summary lists only `src/` rows. Coverage unchanged by design (P2 adds mock capability, not client-facing tests). Deviations recorded below. |
+| 3 | 2026-10-28 | P3 (part 1): shared wiremock fixture layer `tests/common/mod.rs` + `tests/core_methods.rs` — 28 core protocol tests (session fetch, request/response round-trips, call ids, result references, createdIds, capability filtering, problem/method/parse error paths, session staleness + refresh, account/timeout/headers) | **16.67%** lines (6953 instr., 1159 covered) — **+9.90 pp / +688 lines** over the 6.77% re-measured baseline | **37 client pass** (7 lib unit + 2 crypto-provider + 28 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (7 warnings, all pre-existing in `mock-jmap`), coverage summary lists only `src/` rows. Baseline re-measured at **6.77%** with the P3 files removed (the ledger's 7.05% predates the P1/P2 branch state); deltas below are against the re-measured figure. `tests/changes_query.rs` (P3 box 2) is still open. |
+
+#### P3 (part 1) per-file line-coverage delta
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `client.rs` | 24.54% | **81.29%** | +56.75 | 80 → 265 (+185) |
+| `core/session.rs` | 23.76% | **70.72%** | +46.96 | 43 → 128 (+85) |
+| `core/get.rs` | 0.00% | **59.46%** | +59.46 | 0 → 44 (+44) |
+| `core/error.rs` | 0.00% | **42.50%** | +42.50 | 0 → 34 (+34) |
+| `core/request.rs` | 33.33% | **47.24%** | +13.91 | 163 → 231 (+68) |
+| `core/set.rs` | 0.00% | **25.09%** | +25.09 | 0 → 67 (+67) |
+| `core/query.rs` | 0.00% | **25.53%** | +25.53 | 0 → 36 (+36) |
+| `core/response.rs` | 5.13% | **15.62%** | +10.49 | 22 → 67 (+45) |
+| `mailbox/get.rs` | 0.00% | 31.03% | +31.03 | 0 → 27 (+27) |
+| `mailbox/set.rs` | 0.00% | 28.89% | +28.89 | 0 → 26 (+26) |
+| `mailbox/mod.rs` | 0.00% | 26.32% | +26.32 | 0 → 15 (+15) |
+| `mailbox/helpers.rs` | 0.00% | 8.11% | +8.11 | 0 → 18 (+18) |
+| `lib.rs` | 17.81% | 31.51% | +13.70 | 13 → 23 (+10) |
+| `email/mod.rs` | 0.00% | 4.90% | +4.90 | 0 → 15 (+15) |
+| `email/helpers.rs` | 0.00% | 1.98% | +1.98 | 0 → 7 (+7) |
+| `crypto.rs` | 0.00% | 100.00% | +100.00 | 0 → 6 (+6) |
+| **TOTAL** | **6.77%** | **16.67%** | **+9.90** | **471 → 1159 (+688)** |
+
+Still at 0.00% after P3 part 1: `core/changes.rs`, `core/copy.rs`,
+`core/mod.rs`, `core/query_changes.rs`, `event_source/stream.rs`,
+`email/{query,set,search_snippet}.rs`, and every
+`email_submission`/`identity`/`principal`/`push_subscription`/`sieve`/`thread`
+module — i.e. exactly the P4–P6 targets.
 
 ## Findings log
 
@@ -370,5 +435,59 @@ Discovered while building the mock against `src/` + the RFCs. None of these are
     mock *before* the enable is processed and be filtered out forever. Three P2
     tests were flaky until the test helper started sending a `Core/echo` after
     enable/disable and waiting for its `Response`. P7 must use the same pattern
-    (see “Mock push API” above); `wait_for_subscribers()` alone is not enough,
+    (see "Mock push API" above); `wait_for_subscribers()` alone is not enough,
     because it proves the socket is attached, not that push is enabled.
+
+_Discovered writing the P3 wiremock tests against the client's public API._
+
+23. **`Client` does not implement `Debug`.** `Client::new()…connect().await
+    .unwrap_err()` will not compile. Assert connect failures with
+    `match … { Ok(_) => panic!(…), Err(err) => err }` instead.
+24. **`Response::method_response_by_pos(i)` returns `T`, not `Option<T>`.**
+    It `remove`s from the internal vec, so an out-of-range index panics in the
+    Vec, not in an `unwrap()`. There is no fallible positional lookup; use
+    `method_response_by_id` when the id is unknown.
+25. **`TaggedMethodResponse` is not `Clone` (only `Debug`).** A test that wants
+    to look at a response *and* consume it must read what it needs through
+    `method_response_by_id(&self)` first, then take ownership with
+    `method_response_by_pos`.
+26. **`SetResponse::created(id)` mutates `not_created`.** The lookup `remove`s
+    from whichever map holds the id, so calling `created()` and then
+    `unwrap_create_errors()` reports success even though the record failed.
+    Check the aggregate error *before* the per-record lookup (as
+    `set_error_in_not_created_surfaces_as_error_set` does). Same for
+    `updated()` / `not_updated` and `destroyed()` / `not_destroyed`.
+27. **An unrecognised method-error `type` is a *parse* error, not
+    `Error::Method`.** `MethodErrorType` has no catch-all variant, so
+    `["error", {"type": "urn:ietf:params:jmap:error:notFound"}, "s0"]` fails
+    deserialisation of the whole `Response` object and surfaces as
+    `Error::Parse`. RFC 8620 §3.6.2 requires an unknown type to be treated as
+    `serverFail`; the client cannot. P4–P6 must only use `MethodErrorType`
+    variants the enum actually names.
+28. **`urn:ietf:params:jmap:error:unauthorized` is not a `JMAPError`.**
+    `JMAPError` registers exactly four URIs (`unknownCapability`, `notJSON`,
+    `notRequest`, `limit`); everything else, including the 401 `unauthorized`
+    a real server returns for bad credentials, lands in `ProblemType::Other(uri)`
+    with the URI kept verbatim.
+29. **RFC 8620 §2.1's example session spells `maxConcurrentRequest`
+    (singular).** That is a typo in the published example: §2's prose and the
+    client's `CoreCapabilities` field are `maxConcurrentRequests`. A fixture
+    copied literally from the example fails to deserialise.
+30. **`MailCapabilities.maxMailboxDepth` is a non-`Option<usize>`.**
+    `src/email/mod.rs` declares it required, so the RFC-legal `null` value (and
+    a missing member) is rejected. Fixtures must send an integer.
+31. **`client.build().send_get_mailbox()` sends nothing.** The typed `send_*`
+    helpers transmit only the calls already added to the builder, so without a
+    preceding `request.get_mailbox()` the body is `methodCalls: []` — and a
+    canned single-call response still deserialises, so the test would pass while
+    asserting nothing about the call. Every typed-send test must add the call
+    explicitly (`tests/core_methods.rs` wraps this as `send_mailbox_get`).
+32. **Pre-existing `mock-jmap` flake (not P3 work).**
+    `mock-jmap/tests/p2_streams.rs::websocket_refuses_a_connection_that_offers_no_subprotocol`
+    intermittently reads an *empty* rejection body and fails its
+    `missingSubprotocol` assertion (observed 1 run in 3; the other 41 stream
+    tests stayed green). The rejection body write and the client's read race, so
+    this is a timing artefact, not a semantic difference. Follow-up: make the
+    handshake flush and await the body write, or assert only the 400 status
+    there. Out of P3's scope (P3 touches `tests/` in `jmap-client` only),
+    recorded here so the orchestrator can schedule it.
