@@ -243,7 +243,7 @@ object — `TaggedMethodResponse` deserialises from the array, never the object.
 what it needs. An unmatched request gets wiremock's 404, which surfaces as
 `jmap_client::Error::Server` — a loud failure instead of a hang.
 
-### P3 — Integration tests: core  🟨 (core_methods.rs landed; changes_query.rs open)
+### P3 — Integration tests: core  ✅
 - [x] tests/core_methods.rs: session fetch, multi-method requests, references,
       createdIds, capability filtering, error paths (401, problem+json,
       method error, couldNotParseJson) — **28 tests**, wiremock-backed, plus the
@@ -251,9 +251,35 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
       above). Note: the plan named `couldNotParseJson`; per Finding 1 the
       client-side counterpart of a malformed body is `Error::Parse`, which is
       what is asserted.
-- [ ] tests/changes_query.rs: changes/query/queryChanges across types
-- [x] Verify + commit — *this increment* (core_methods.rs only); P3 is not
-      closed until `changes_query.rs` lands.
+- [x] tests/changes_query.rs: changes/query/queryChanges across types —
+      **23 tests**, wiremock-backed:
+      * Changes: `Mailbox/changes`, `Email/changes`, `Thread/changes`
+        round-trips (RFC 8620 §5.2 / RFC 8621 §2.2, §3.2, §4.3), paging
+        through the RFC's `B → B-D-E → E` intermediate states,
+        `updatedProperties` present and `null`, `cannotCalculateChanges`,
+        and a missing-required-member parse failure (Finding 8).
+      * Query: `Mailbox/query` and `Email/query` with AND/OR filter
+        operators, `Comparator`s (ascending/descending + `collation`),
+        `position`/`limit`/`calculateTotal`, Mailbox `sortAsTree`/
+        `filterAsTree`, Email `collapseThreads` (RFC 8620 §5.5,
+        RFC 8621 §2.3, §4.4); `unsupportedSort` / `unsupportedFilter`
+        method errors; `canCalculateChanges=false` and its absent-member
+        default.
+      * QueryChanges: `Mailbox/queryChanges` and `Email/queryChanges`
+        round-trips with `sinceQueryState`/`upToId`/`maxChanges`/
+        `calculateTotal` and `AddedItem{id,index}` (RFC 8620 §5.6,
+        RFC 8621 §2.4, §4.5); `tooManyChanges` and
+        `cannotCalculateChanges` errors.
+      * Cross-cutting: the `src/lib.rs` doc-example chain
+        (`changes_mailbox` → `updated_reference`/`updated_properties_reference`
+        → `get_mailbox().ids_ref().properties_ref()`), the full RFC 8621
+        §2.6 three-call changes→get chain, the RFC 8621 §4.10
+        query→get `#ids: /ids` chain, and a mixed request where one call
+        errors and the other still unwraps.
+      Section numbering note: the standard methods live at RFC 8620
+      **§5.2** (`/changes`), **§5.5** (`/query`) and **§5.6**
+      (`/queryChanges`) — not §5.1 as the task brief assumed.
+- [x] Verify + commit — P3 closed by this increment (28 + 23 tests green).
 
 ### P3-followup — mock-jmap WS handshake flake (fix before P7) ⬜
 - `websocket_refuses_a_connection_that_offers_no_subprotocol` intermittently
@@ -310,6 +336,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 1 | 2026-10-28 | P1: `mock-jmap` workspace crate (HTTP core + session + full method registry + blob upload/download) | 6.04% (unchanged) | 9 client pass · 35 mock self-tests pass · 2 mock doctests pass | `cargo check -p mock-jmap`, `cargo test -p mock-jmap`, `cargo test -p jmap-client` all green. Coverage unchanged by design: P1 adds the mock, not client-facing tests; the mock crate is excluded from the metric. Deviations recorded below. |
 | 2 | 2026-10-28 | P2: `mock-jmap` EventSource (SSE) + RFC 8887 WebSocket legs, `PushBus` push model, mock control API for driving pushes against open streams | 6.04% (unchanged) | 9 client pass · 41 P2 stream tests pass · 35 P1 mock self-tests pass · 4 mock doctests pass | `cargo test -p mock-jmap`, `cargo test -p jmap-client`, `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` all green; the summary lists only `src/` rows. Coverage unchanged by design (P2 adds mock capability, not client-facing tests). Deviations recorded below. |
 | 3 | 2026-10-28 | P3 (part 1): shared wiremock fixture layer `tests/common/mod.rs` + `tests/core_methods.rs` — 28 core protocol tests (session fetch, request/response round-trips, call ids, result references, createdIds, capability filtering, problem/method/parse error paths, session staleness + refresh, account/timeout/headers) | **16.67%** lines (6953 instr., 1159 covered) — **+9.90 pp / +688 lines** over the 6.77% re-measured baseline | **37 client pass** (7 lib unit + 2 crypto-provider + 28 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (7 warnings, all pre-existing in `mock-jmap`), coverage summary lists only `src/` rows. Baseline re-measured at **6.77%** with the P3 files removed (the ledger's 7.05% predates the P1/P2 branch state); deltas below are against the re-measured figure. `tests/changes_query.rs` (P3 box 2) is still open. |
+| 4 | 2026-10-28 | P3 (part 2): `tests/changes_query.rs` — 23 changes/query/queryChanges tests (Mailbox+Email+Thread changes round-trips and RFC §5.2 paging, `updatedProperties`, Mailbox/Email query filter+Comparator+collation+window, Mailbox/Email queryChanges with `AddedItem`, `cannotCalculateChanges`/`tooManyChanges`/`unsupportedSort`/`unsupportedFilter`, `canCalculateChanges=false`, and the lib.rs-doc-example + RFC 8621 §2.6/§4.10 result-reference chains) | **22.26%** lines (6953 instr., 1548 covered) — **+5.59 pp / +389 lines** over P3 part 1's 16.67% | **60 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green, `cargo test -p mock-jmap` green, `cargo clippy -p jmap-client --all-targets` clean for `tests/` (the only 7 warnings are the pre-existing `mock-jmap` lib ones), coverage summary lists only `src/` rows. `core/changes.rs` and `core/query_changes.rs` went from 0.00% to ~94%/~94%; `core/query.rs` 25.53% → 71.63%. P3 is now closed. New contract facts recorded as Findings 33–38. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -333,10 +360,35 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | `crypto.rs` | 0.00% | 100.00% | +100.00 | 0 → 6 (+6) |
 | **TOTAL** | **6.77%** | **16.67%** | **+9.90** | **471 → 1159 (+688)** |
 
-Still at 0.00% after P3 part 1: `core/changes.rs`, `core/copy.rs`,
-`core/mod.rs`, `core/query_changes.rs`, `event_source/stream.rs`,
-`email/{query,set,search_snippet}.rs`, and every
-`email_submission`/`identity`/`principal`/`push_subscription`/`sieve`/`thread`
+#### P3 (part 2) per-file line-coverage delta
+
+Against the state after P3 part 1 (`16.67%` / 1159 lines covered).
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `core/changes.rs` | 0.00% | **94.03%** | +94.03 | 0 → 63 (+63) |
+| `core/query_changes.rs` | 0.00% | **93.65%** | +93.65 | 0 → 59 (+59) |
+| `core/query.rs` | 25.53% | **71.63%** | +46.10 | 36 → 101 (+65) |
+| `mailbox/query.rs` | 0.00% | **57.89%** | +57.89 | 0 → 22 (+22) |
+| `thread/helpers.rs` | 0.00% | **34.38%** | +34.38 | 0 → 11 (+11) |
+| `mailbox/helpers.rs` | 8.11% | **25.68%** | +17.57 | 18 → 57 (+39) |
+| `email/helpers.rs` | 1.98% | **12.99%** | +11.01 | 7 → 46 (+39) |
+| `email/query.rs` | 0.00% | **11.32%** | +11.32 | 0 → 18 (+18) |
+| `mailbox/mod.rs` | 26.32% | **36.84%** | +10.52 | 15 → 21 (+6) |
+| `core/request.rs` | 47.24% | **54.40%** | +7.16 | 231 → 266 (+35) |
+| `core/get.rs` | 59.46% | **66.22%** | +6.76 | 44 → 49 (+5) |
+| `core/response.rs` | 15.62% | **19.81%** | +4.19 | 67 → 85 (+18) |
+| `core/error.rs` | 42.50% | **46.25%** | +3.75 | 34 → 37 (+3) |
+| `email/mod.rs` | 4.90% | 6.86% | +1.96 | 15 → 21 (+6) |
+| **TOTAL** | **16.67%** | **22.26%** | **+5.59** | **1159 → 1548 (+389)** |
+
+Unchanged by this increment: `client.rs` (81.29%), `core/session.rs`
+(70.72%), `lib.rs` (31.51%), `crypto.rs` (100%), `mailbox/get.rs` (31.03%).
+
+Still at 0.00% after P3: `core/copy.rs`, `core/mod.rs`,
+`email/{get,import,parse,set,search_snippet}.rs`, `event_source/stream.rs`,
+`thread/{get,mod}.rs`, and every
+`email_submission`/`identity`/`principal`/`push_subscription`/`sieve`
 module — i.e. exactly the P4–P6 targets.
 
 ## Findings log
@@ -499,3 +551,46 @@ _Discovered writing the P3 wiremock tests against the client's public API._
     handshake flush and await the body write, or assert only the 400 status
     there. Out of P3's scope (P3 touches `tests/` in `jmap-client` only),
     recorded here so the orchestrator can schedule it.
+
+_Discovered writing the P3 changes/query/queryChanges wiremock tests._
+
+33. **`MockServer::reset()` clears the recorded requests, not just the mocks.**
+    A multi-phase test that reads the spy log after a reset sees only the
+    post-reset requests, so a `jmap_request_bodies(…).len() == 2` assertion
+    fails against a one-entry log. Snapshot with `single_jmap_request` *before*
+    resetting, or assert one phase at a time. (The `tests/common/mod.rs`
+    helpers are unaffected; this is wiremock's own semantics.)
+34. **There is no `upToPosition` in `/queryChanges`.** RFC 8620 §5.6 makes
+    `upToId` a *request* argument only; the response carries
+    `{accountId, oldQueryState, newQueryState, total?, removed, added}` and
+    `QueryChangesResponse` matches that exactly. Anything expecting an
+    `upToPosition` response member is inventing a member.
+35. **`QueryChangesRequest.calculateTotal` is always serialised.** It is a
+    plain `bool` (default `false`), not `Option<bool>` like
+    `QueryRequest::calculate_total`, so `calculateTotal: false` is on the wire
+    even when the test never sets it. RFC 8620 §5.6 gives the same default, so
+    the request stays conformant — but the member is never absent. Same story
+    for Mailbox's `sortAsTree`/`filterAsTree`, which ride along on both
+    `Mailbox/query` and `Mailbox/queryChanges`.
+36. **The client does not validate `maxChanges`.**
+    `ChangesRequest::max_changes(0)` serialises `"maxChanges": 0`, which
+    RFC 8620 §5.2 says a server MUST reject with `invalidArguments` ("If
+    supplied by the client, the value MUST be a positive integer greater than
+    0"). The crate's own doc example in `src/lib.rs` uses `0`. The test
+    asserts the serialisation; a real server would answer `invalidArguments`.
+37. **A `()` per-type changes extension deserialises fine.** For
+    Email/Thread/Identity/… `ChangesObject::ChangesResponse = ()`, and
+    serde's `FlatMapDeserializer::deserialize_unit` accepts the empty
+    flattened map, so a standard `/changes` response with no extra members
+    parses. Only Mailbox has a real extension (`updatedProperties`,
+    RFC 8621 §2.2), reachable through
+    `response.arguments().updated_properties()` — it is *not* a member of the
+    core `ChangesResponse`.
+38. **`QueryResponse`/`QueryChangesResponse` are not re-exported from
+    `core::response`.** `src/core/response.rs` imports them privately to build
+    its `MethodResponse` variants. Tests must name
+    `jmap_client::core::query::QueryResponse` and
+    `jmap_client::core::query_changes::QueryChangesResponse`; only the
+    generic `ChangesResponse<O>` aliases (`MailboxChangesResponse`,
+    `EmailChangesResponse`, `ThreadChangesResponse`) are public in
+    `core::response`.
