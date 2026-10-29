@@ -21,13 +21,14 @@
 //!   correct for a single-id fetch (same trap as `Client::thread_get`,
 //!   Finding #48) — pinned by
 //!   [`email_submission_get_pops_the_last_record_when_the_server_returns_several`].
-//! * `Request::send_single<T>` deserialises EVERY response in the envelope as
-//!   `T` and then pops the **last** one (Finding #49). RFC 8621 §7.5 says an
-//!   `EmailSubmission/set` that asks for `onSuccessUpdateEmail`/
-//!   `onSuccessDestroyEmail` returns a second, implicit `Email/set` response
-//!   *after* the submission response under the same call id, so the client
-//!   helper lands on the wrong body — pinned by
-//!   [`email_submission_create_with_the_rfc_implicit_email_set_response_lands_on_the_wrong_body`].
+//! * `Request::send_single<T>` picks the FIRST response that carries the
+//!   request's call id and deserialises only that one. RFC 8621 §7.5 makes an
+//!   `EmailSubmission/set` that asks for
+//!   `onSuccessUpdateEmail`/`onSuccessDestroyEmail` issue a single implicit
+//!   `Email/set` call whose response "MUST be returned after the
+//!   EmailSubmission/set response", and §7.5.1 shows both answers under the
+//!   same call id, so the primary result is the first of the two — pinned by
+//!   [`email_submission_create_with_the_rfc_implicit_email_set_response_returns_the_submission`].
 
 mod common;
 
@@ -148,8 +149,9 @@ fn submission_created_body() -> Value {
     })
 }
 
-/// The implicit `Email/set` response RFC 8621 §7.5.1 says MUST follow the
-/// `EmailSubmission/set` response under the *same* method call id.
+/// The implicit `Email/set` response RFC 8621 §7.5 says MUST be returned after
+/// the `EmailSubmission/set` response; the §7.5.1 example shows both under the
+/// *same* method call id.
 fn implicit_email_set_response() -> Value {
     json!({
         "accountId": ACCOUNT_ID,
@@ -595,11 +597,13 @@ async fn email_submission_create_reports_no_recipients() {
 }
 
 #[tokio::test]
-async fn email_submission_create_with_the_rfc_implicit_email_set_response_lands_on_the_wrong_body() {
+async fn email_submission_create_with_the_rfc_implicit_email_set_response_returns_the_submission() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
     // RFC 8621 §7.5.1: "Note that there are two responses due to the implicit
-    // Email/set call, but both have the same method call id".
+    // \"Email/set\" call, but both have the same method call id as they are due
+    // to the same call in the request." The submission result is the FIRST of
+    // the two, the implicit Email/set body the second.
     mount_jmap(
         &server,
         jmap_response(
@@ -612,20 +616,21 @@ async fn email_submission_create_with_the_rfc_implicit_email_set_response_lands_
     )
     .await;
 
-    // `send_single` parses the whole envelope and pops the LAST response
-    // (Finding #49), so the helper ends up holding the implicit Email/set body,
-    // which has no `created` member at all.
-    let err = client
+    // `send_single` takes the FIRST response carrying the request's call id
+    // (Findings #49/#54), so the helper reads the primary EmailSubmission/set
+    // body and hands back the created submission instead of tripping over the
+    // implicit Email/set body, which has no `created` member at all.
+    let submission = client
         .email_submission_create("M7f6ed5bcfd7e2604d1753f6c", "I64588216")
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, Error::Internal(_)),
-        "expected Error::Internal(\"Id c0 not found.\"), got {err:?}"
+        .expect("the implicit Email/set response must not shadow the primary result");
+    assert_eq!(
+        submission.id().unwrap().to_string(),
+        "ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0"
     );
 
-    // The RFC-correct way to read this batch is `Request::send()` plus an
-    // explicit positional unwrap of the *first* response.
+    // The same batch read explicitly: both responses are on the wire, in the
+    // RFC's order, and each still parses into its own type.
     let mut request = client.build();
     request
         .set_email_submission()
@@ -634,6 +639,15 @@ async fn email_submission_create_with_the_rfc_implicit_email_set_response_lands_
         .identity_id("I64588216");
     let mut response = request.send().await.unwrap();
     assert_eq!(response.method_responses().len(), 2);
+    assert_eq!(
+        response
+            .method_responses()
+            .iter()
+            .map(|r| r.call_id())
+            .collect::<Vec<_>>(),
+        vec!["s0", "s0"],
+        "RFC 8621 §7.5.1: both responses carry the same method call id"
+    );
 
     let mut submission_response = response
         .method_response_by_pos(0)

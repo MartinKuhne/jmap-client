@@ -59,8 +59,45 @@ draft-ietf-jmap-sieve-12.
   corrected in `src/lib.rs`, `examples/result_reference.rs` and `README.md`.
   **Breaking:** exhaustive matches on `MethodErrorType` without a `_` arm stop
   compiling. 617 passed / 0 failed.
-* **B1 residual (tracked as B1b).** A method error whose `type` member is
-  missing or not a string still falls through the untagged
-  `SingleMethodResponse` and can be absorbed as an all-`None` `SetResponse`.
-  The catch-all fixes the *unrecognised-but-well-formed* case; the root cause is
-  the untagged enum itself, which needs a structural fix.
+* **B1b done** (#112 root cause). `SingleMethodResponse` is no longer `#[serde(untagged)]`.
+  A hand-written `Deserialize` (a `Visitor` over `SeqAccess`) decides the arm from
+  the *first element* of the Invocation array — `"error"` → `Error`, anything else
+  → `Ok` — and only then deserialises the payload, so a malformed method error can
+  never be absorbed as an all-`None` `SetResponse`. RFC 8620 §3.2 fixes an
+  Invocation at `[name, arguments, callId]`; §3.6.2 defines the error form as
+  `[ "error", { "type": "unknownMethod" }, "call-id" ]` and says "The response
+  name is "error", and it MUST have a type property." An untagged enum cannot
+  express that: it tries the `Error` arm and, on *any* failure of that arm,
+  silently retries the `Ok` arm — which binds element 0 as a bare `String` — so
+  `["error", {}, "0"]` came back as a successful `SetResponse` with every member
+  absent. A missing or empty array, a non-string method name, an `error` response
+  whose arguments are not a `MethodError` object, and a call id that is not a
+  string are all hard errors now. The enum's public shape is unchanged
+  (non-breaking); a `call_id()` accessor was added so callers can match on the
+  request id without destructuring.
+  `tests/core_methods.rs::a_malformed_method_error_on_a_set_response_is_never_a_silent_success`
+  drives all five malformed shapes end to end through `send_set_mailbox()`.
+* **B2 done** (#40 #54 #66). `Request::send_single` returns the **first** response
+  whose call id equals the request's, not the last one in the array. RFC 8620 §3.2:
+  a method "may return 1 or more responses, as it may make implicit calls to other
+  methods; all responses initiated by this method call get the same method call id
+  in the response", and §3.4 requires outputs to be added "in the same order that
+  the methods are processed" — so the primary answer is first and the implicit one
+  after it. RFC 8621 §7.5 makes `EmailSubmission/set` issue a single implicit
+  `Email/set` whose response "MUST be returned after the EmailSubmission/set
+  response", and §7.5.1 shows both answers under one call id; RFC 8620 §5.4
+  (`/copy` with `onSuccessDestroyOriginal`, which RFC 8621 §4.7 adopts for
+  `Email/copy`) has the same shape. Reading the tail handed the caller the
+  implicit body and turned a copy or submission that *succeeded* into a parse
+  error. Only the selected response's arguments are deserialised into `T` now, so
+  an implicit secondary body of a different type can no longer poison the envelope
+  before the selection happens. `GetResponse.state` is `#[serde(default)]`:
+  RFC 8620 §7.2.1 says of `PushSubscription/get` that "It also does *not* return a
+  "state" argument", and the §7.2.3 example response carries only `list` and
+  `notFound`, so requiring the member made a compliant response fail to parse; the
+  `tests/push_subscription.rs` fixture that injected a `"state"` to work around
+  this is corrected. **Not breaking** for the documented single-call usage; the
+  tests that pinned the old behaviour (`tests/email.rs`,
+  `tests/email_submission.rs`, `tests/search_snippet.rs`) are rewritten to assert
+  the RFC behaviour, none deleted, and `tests/sieve.rs` gains the
+  extra-response-under-one-call-id case. 624 passed / 0 failed.

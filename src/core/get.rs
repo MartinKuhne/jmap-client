@@ -53,6 +53,15 @@ pub struct GetResponse<T> {
     #[serde(rename = "accountId")]
     account_id: Option<String>,
 
+    /// The state of the object type in the account the response answers.
+    ///
+    /// Absent is allowed: RFC 8620 §7.2.1 says of `PushSubscription/get` that
+    /// "it does *not* take or return an 'accountId' argument... It also does
+    /// *not* return a 'state' argument", and the §7.2.3 example response
+    /// carries only `list` and `notFound`. The member therefore defaults to the
+    /// empty string, which is what [`GetResponse::state`] reads back when the
+    /// server did not send one.
+    #[serde(default)]
     state: String,
 
     list: Vec<T>,
@@ -296,5 +305,20 @@ mod tests {
             serde_json::to_value(&request).unwrap(),
             json!({ "accountId": "u33084183", "fetchTextBodyValues": true })
         );
+    }
+
+    /// RFC 8620 §7.2.1 — `PushSubscription/get` "does *not* return a 'state'
+    /// argument", so the member is optional on the generic [`GetResponse`]: a
+    /// response that leaves it out parses, and the accessor reads back the
+    /// empty string rather than failing the whole method.
+    #[test]
+    fn a_get_response_without_a_state_member_parses() {
+        let mut response: GetResponse<String> =
+            serde_json::from_str(r#"{"list": ["x"], "notFound": []}"#)
+                .expect("a §7.2.1 get result carries no state member");
+
+        assert_eq!(response.state(), "", "absence reads back as empty");
+        assert_eq!(response.take_state(), "");
+        assert_eq!(response.list(), ["x"]);
     }
 }

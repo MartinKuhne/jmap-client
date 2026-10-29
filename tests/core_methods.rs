@@ -1164,6 +1164,77 @@ async fn a_set_response_with_an_unmodelled_error_type_yields_error_method_when_u
     assert!(method_err.is_server_fail_equivalent());
 }
 
+/// RFC 8620 §3.6.2 — a method-level error must never be read as a success,
+/// whatever the shape of its payload.
+///
+/// The root cause behind Finding #112: `SingleMethodResponse` was
+/// `#[serde(untagged)]`, so serde tried the `Error` arm and, on *any* failure of
+/// that arm, silently retried the `Ok` arm. `Ok` binds element 0 as a bare
+/// `String`, so `["error", <payload>, "s0"]` became `Ok(("error", <payload>,
+/// "s0"))` whenever `<payload>` was not a valid method error — and every member
+/// of a `SetResponse` is optional, so a `Set` refusal deserialised into an
+/// all-`None` success and the caller was told the write had worked. The arm is
+/// now chosen on element 0 alone, so a payload that will not parse fails loudly
+/// instead of becoming a fake success.
+#[tokio::test]
+async fn a_malformed_method_error_on_a_set_response_is_never_a_silent_success() {
+    // `type` is a required member of the method error object (RFC 8620 §3.6.2).
+    // The last field says whether the payload is still a parseable error.
+    let cases = [
+        (json!({}), "carries no `type` member", false),
+        (json!({ "type": 42 }), "spells `type` as a number", false),
+        (
+            json!({ "type": "serverFail", "description": 999 }),
+            "carries a wrong-typed extra member",
+            true,
+        ),
+        (json!("serverFail"), "is not an object at all", false),
+        (Value::Null, "is null", false),
+    ];
+
+    for (payload, why, is_a_parseable_error) in cases {
+        let server = MockServer::start().await;
+        let client = connected_client(&server).await;
+        mount_jmap(
+            &server,
+            jmap_response(vec![inv("error", "s0", payload)], SESSION_STATE),
+        )
+        .await;
+
+        let mut request = client.build();
+        request.set_mailbox().update("mf2").name("Renamed");
+        let err = request
+            .send_set_mailbox()
+            .await
+            .expect_err(&format!(
+                "an error Invocation that {why} must never read as an empty success"
+            ));
+
+        if is_a_parseable_error {
+            let Error::Method(method_err) = err else {
+                panic!("expected Error::Method, got {err:?}");
+            };
+            assert_eq!(
+                method_err.error(),
+                &MethodErrorType::ServerFail,
+                "the server's own error type must survive"
+            );
+        } else {
+            assert!(
+                matches!(err, Error::Parse(_)),
+                "expected Error::Parse, got {err:?}"
+            );
+        }
+
+        // The call really did go out, so this is the response to *our* request
+        // and not a fixture that never matched (Finding #31).
+        assert_eq!(
+            single_jmap_request(&server).await["methodCalls"][0][0],
+            "Mailbox/set"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 10. request-level problem on POST
 // ---------------------------------------------------------------------------

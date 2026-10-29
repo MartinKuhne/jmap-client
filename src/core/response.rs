@@ -11,7 +11,7 @@
 
 use ahash::AHashMap;
 use serde::{de::Visitor, Deserialize};
-use std::fmt;
+use std::{fmt, marker::PhantomData};
 
 use crate::{
     blob::copy::CopyBlobResponse,
@@ -101,11 +101,98 @@ impl Response<TaggedMethodResponse> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+/// One method response of a JMAP `Response` object (RFC 8620 §3.4).
+///
+/// An Invocation is `[name, arguments, callId]` (§3.2), and §3.6.2 spells a
+/// method-level error as `["error", {…}, callId]`: the only thing that tells
+/// the two apart is element 0 being the literal `"error"`, so the arm is
+/// decided *structurally*, on element 0 alone, before the payload is looked at.
+///
+/// That is why this is a hand-written [`Deserialize`] and not
+/// `#[serde(untagged)]`. An untagged enum tries the `Error` arm and, on *any*
+/// failure of that arm, silently retries the `Ok` arm — and the `Ok` arm binds
+/// element 0 as a bare `String`, so `["error", <payload>, "0"]` becomes
+/// `Ok(("error", <payload>, "0"))` whenever `<payload>` fails to parse as a
+/// [`MethodError`] (no `type`, `type` not a string, payload not an object at
+/// all). Against a `SetResponse`, whose every member is optional, that is an
+/// all-`None` success: a server refusal reported to the caller as a successful
+/// write. Here an `error` Invocation whose payload does not parse is a
+/// deserialisation error; it can never become an `Ok`.
+#[derive(Debug)]
 pub enum SingleMethodResponse<T> {
     Error((Error, MethodError, String)),
     Ok((String, T, String)),
+}
+
+impl<T> SingleMethodResponse<T> {
+    /// The method call id this response answers (RFC 8620 §3.2: the third
+    /// element of the Invocation, equal to the `callId` of the call it
+    /// answers).
+    pub fn call_id(&self) -> &str {
+        match self {
+            SingleMethodResponse::Error((_, _, id)) => id,
+            SingleMethodResponse::Ok((_, _, id)) => id,
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for SingleMethodResponse<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(SingleMethodResponseVisitor(PhantomData))
+    }
+}
+
+struct SingleMethodResponseVisitor<T>(PhantomData<T>);
+
+impl<'de, T> Visitor<'de> for SingleMethodResponseVisitor<T>
+where
+    T: Deserialize<'de>,
+{
+    type Value = SingleMethodResponse<T>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("a valid JMAP method response")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        // Element 0 picks the arm, and nothing downstream can change that
+        // decision: an `error` Invocation whose payload will not parse fails
+        // the deserialisation instead of falling through to the success arm.
+        let name = seq
+            .next_element::<String>()?
+            .ok_or_else(|| serde::de::Error::custom("Expected a method name"))?;
+
+        if name == "error" {
+            let error = seq
+                .next_element::<MethodError>()?
+                .ok_or_else(|| serde::de::Error::custom("Expected a method error"))?;
+
+            let id = seq
+                .next_element::<String>()?
+                .ok_or_else(|| serde::de::Error::custom("Expected method call id"))?;
+
+            Ok(SingleMethodResponse::Error((Error::Error, error, id)))
+        } else {
+            let response = seq
+                .next_element::<T>()?
+                .ok_or_else(|| serde::de::Error::custom("Expected a method response"))?;
+
+            let id = seq
+                .next_element::<String>()?
+                .ok_or_else(|| serde::de::Error::custom("Expected method call id"))?;
+
+            Ok(SingleMethodResponse::Ok((name, response, id)))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -889,11 +976,9 @@ mod tests {
         }
     }, "c0"]"#;
 
-    /// RFC 8620 §7.2.3 — `PushSubscription/get`. The RFC example carries no
-    /// `state` (§7.2.1 says the method does not return one) but the generic
-    /// `GetResponse<T>` requires it, so the fixture supplies one.
+    /// RFC 8620 §7.2.3 — `PushSubscription/get`, verbatim. The method returns
+    /// neither `accountId` nor `state` (§7.2.1), so the fixture carries neither.
     const PUSH_SUBSCRIPTION_GET: &str = r#"["PushSubscription/get", {
-        "state": "u1",
         "list": [{
             "id": "f2d0aab5-e976-4e8b-ad4b-b380a5b987e4",
             "deviceClientId": "X8980fc",
@@ -1574,6 +1659,138 @@ mod tests {
         );
     }
 
+    /// RFC 8620 §3.6.2 — an `error` Invocation must never read as a success.
+    ///
+    /// This is the root cause of Finding #112. Under `#[serde(untagged)]` serde
+    /// tried the `Error` arm and, on *any* failure of that arm, silently retried
+    /// the `Ok` arm — which binds element 0 as a bare `String`, so
+    /// `["error", <payload>, "0"]` became `Ok(("error", <payload>, "0"))`
+    /// whenever `<payload>` was not a valid [`MethodError`]. Every member of a
+    /// `SetResponse` is optional, so against a `Set` call the server's refusal
+    /// deserialised into an all-`None` success and the caller was told the write
+    /// had worked. The arm is now chosen on element 0 alone, so a payload that
+    /// will not parse fails the deserialisation instead.
+    #[test]
+    fn a_malformed_error_invocation_never_becomes_an_all_none_set_success() {
+        // Each case is an `error` Invocation body for a `Mailbox/set` call. The
+        // second field is the part of the deserialisation error that names the
+        // problem; an empty one means the payload *is* a valid `MethodError`.
+        let cases = [
+            ("{}", "missing field"),
+            (r#"{"type": 42}"#, "invalid type: integer `42`"),
+            (r#"{"type": "serverFail", "description": 999}"#, ""),
+            (r#""serverFail""#, "invalid type: string"),
+            ("null", "invalid type: null"),
+        ];
+
+        for (payload, reason) in cases {
+            let json = format!(r#"["error", {payload}, "0"]"#);
+            let parsed = serde_json::from_str::<SingleMethodResponse<MailboxSetResponse>>(&json);
+
+            if reason.is_empty() {
+                match &parsed.expect("a well-formed method error must parse") {
+                    SingleMethodResponse::Error((_, error, id)) => {
+                        assert_eq!(
+                            error.error(),
+                            &MethodErrorType::ServerFail,
+                            "{json} must reach the caller as its own error type"
+                        );
+                        assert_eq!(id, "0");
+                    }
+                    response => {
+                        panic!("an `error` Invocation must not land in the Ok arm: {response:?}")
+                    }
+                }
+            } else {
+                let error = parsed.expect_err(&format!(
+                    "{json} must not deserialise as a Set response: a refusal \
+                     reported as a successful write"
+                ));
+                assert!(
+                    error.to_string().contains(reason),
+                    "{json} must report {reason:?}, got {error}"
+                );
+            }
+        }
+
+        // The fix must not swallow the honest case: a real `Mailbox/set` body
+        // still arrives in the `Ok` arm (RFC 8621 §2.6 example).
+        assert!(matches!(
+            serde_json::from_str::<SingleMethodResponse<MailboxSetResponse>>(
+                r#"["Mailbox/set", {
+                    "accountId": "u33084183",
+                    "oldState": "78542",
+                    "newState": "78549",
+                    "updated": { "mf2": null }
+                }, "0"]"#,
+            )
+            .expect("a well-formed Set response must deserialise"),
+            SingleMethodResponse::Ok(_)
+        ));
+    }
+
+    /// RFC 8620 §3.2 fixes an Invocation at `[name, arguments, callId]`, and the
+    /// hand-written visitor keeps that shape for both arms: anything that is not
+    /// a three-element array is rejected with the visitor's own message.
+    #[test]
+    fn a_single_method_response_must_be_a_three_element_invocation() {
+        let error =
+            serde_json::from_str::<SingleMethodResponse<serde_json::Value>>(r#"{"not": "a seq"}"#)
+                .expect_err("a JMAP method response must be an array");
+        assert_eq!(
+            error.to_string(),
+            "invalid type: map, expected a valid JMAP method response at line 1 column 0"
+        );
+
+        for (json, expected) in [
+            (r#"[]"#, "Expected a method name at line 1 column 2"),
+            (r#"["error"]"#, "Expected a method error at line 1 column"),
+            (
+                r#"["error", {"type": "forbidden"}]"#,
+                "Expected method call id",
+            ),
+            (r#"["Mailbox/set", {}]"#, "Expected method call id"),
+            (r#"["Mailbox/set"]"#, "Expected a method response"),
+            (
+                r#"[42, {}, "c0"]"#,
+                "invalid type: integer `42`, expected a string",
+            ),
+        ] {
+            let error = serde_json::from_str::<SingleMethodResponse<serde_json::Value>>(json)
+                .expect_err(&format!("{json} is not a valid Invocation"));
+            assert!(
+                error.to_string().contains(expected),
+                "{json} must report {expected:?}, got {error}"
+            );
+        }
+
+        // A fourth element is trailing garbage, not a longer Invocation.
+        assert!(
+            serde_json::from_str::<SingleMethodResponse<serde_json::Value>>(
+                r#"["Mailbox/set", {}, "c0", "extra"]"#
+            )
+            .is_err()
+        );
+    }
+
+    /// The call id is the third element of the Invocation in both arms, which is
+    /// what lets [`Request::send_single`](crate::core::request::Request::send_single)
+    /// pick the response that answers its own call.
+    #[test]
+    fn call_id_reads_the_third_element_of_either_arm() {
+        let ok = serde_json::from_str::<SingleMethodResponse<serde_json::Value>>(
+            r#"["Mailbox/get", {"a": 1}, "c1"]"#,
+        )
+        .unwrap();
+        let err = serde_json::from_str::<SingleMethodResponse<serde_json::Value>>(
+            r#"["error", {"type": "serverFail"}, "c2"]"#,
+        )
+        .unwrap();
+
+        assert_eq!(ok.call_id(), "c1");
+        assert_eq!(err.call_id(), "c2");
+    }
+
     // ------------------------------------------------------- blob + push
 
     #[test]
@@ -1624,7 +1841,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.account_id(), None, "push is not account scoped");
-        assert_eq!(response.state(), "u1");
+        assert_eq!(
+            response.state(),
+            "",
+            "RFC 8620 §7.2.1: the method returns no state"
+        );
         assert_eq!(response.list().len(), 1);
         assert_eq!(response.not_found(), &[] as &[String]);
 
@@ -1644,7 +1865,11 @@ mod tests {
             )
         );
 
-        assert_eq!(response.take_state(), "u1");
+        assert_eq!(
+            response.take_state(),
+            "",
+            "nothing was taken from an absent state"
+        );
         assert_eq!(response.state(), "");
         assert_eq!(response.take_list().len(), 1);
         assert!(response.list().is_empty());

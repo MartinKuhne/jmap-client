@@ -1578,14 +1578,19 @@ async fn email_copy_reports_not_created() {
 }
 
 #[tokio::test]
-async fn email_copy_with_the_rfc_implicit_set_response_is_a_parse_error() {
+async fn email_copy_with_the_rfc_implicit_set_response_returns_the_copy_result() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    // RFC 8621 §4.7: a successful `Email/copy` with
-    // `onSuccessDestroyOriginal` produces TWO method responses for the one call,
-    // the copy result first and the implicit `Email/set` second. `send_single`
-    // reads the LAST response, so `Client::email_copy` tries to parse the
-    // `Email/set` body as a `CopyResponse` and fails. See the Findings log.
+    // RFC 8621 §4.7 makes `Email/copy` a standard `/copy`, so RFC 8620 §5.4
+    // applies: with `onSuccessDestroyOriginal` the server MUST make the implicit
+    // `Email/set` call "after emitting the Foo/copy response", and "the output
+    // of this is added to the responses as normal, to be returned to the
+    // client". That is TWO method responses for the one call, the copy result
+    // FIRST and the implicit `Email/set` second, both under the same call id
+    // (RFC 8620 §3.2). Reading the primary response is what makes the helper see
+    // the copy body; reading the tail used to parse the `Email/set` body as a
+    // `CopyResponse` and fail a successful operation with `Error::Parse`
+    // (Findings #40/#49).
     mount_jmap(
         &server,
         jmap_response(
@@ -1619,14 +1624,21 @@ async fn email_copy_with_the_rfc_implicit_set_response_is_a_parse_error() {
     )
     .await;
 
-    let err = client
+    let copied = client
         .email_copy("ue150411c", "src1", ["75a4c956"], None::<Keywords>, None)
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, Error::Parse(_)),
-        "expected Error::Parse, got {err:?}"
-    );
+        .expect("the implicit Email/set response must not shadow the copy result");
+
+    assert_eq!(copied.id(), Some("dst1"));
+    assert_eq!(copied.blob_id(), Some("B2"));
+    assert_eq!(copied.thread_id(), Some("T2"));
+    assert_eq!(copied.size(), 10);
+
+    // The request really was the RFC's destroy-the-original shape, so the two
+    // responses are an answer to this call and not an unmatched fixture.
+    let call = single_jmap_request(&server).await["methodCalls"][0].clone();
+    assert_eq!(call[0], "Email/copy");
+    assert_eq!(call[2], "s0", "the client's single call id");
 }
 
 // ---------------------------------------------------------------------------

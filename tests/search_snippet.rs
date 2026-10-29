@@ -24,8 +24,8 @@ use common::{
 use jmap_client::core::query::Filter;
 use jmap_client::core::request::ResultReference;
 use jmap_client::email::query as email_query;
-use jmap_client::Method;
 use jmap_client::Error;
+use jmap_client::Method;
 use serde_json::{json, Value};
 use wiremock::MockServer;
 
@@ -379,9 +379,9 @@ async fn search_snippet_can_reference_the_query_that_produced_the_ids() {
     let reference = request.last_result_reference("/ids");
     request.get_search_snippet().email_ids_ref(reference);
 
-    // `send_single` deserialises *every* response in the envelope as the same
-    // `T`, so a heterogeneous Query+Snippet batch must go through `send()` and
-    // be unwrapped per method instead (see the findings log).
+    // A batch of two different methods is read with `send()` and unwrapped per
+    // method, because each response has its own type; `send_single` can only
+    // answer for one of them (see the test below).
     let mut response = request.send().await.unwrap();
     let snippet_response = response
         .pop_method_response()
@@ -410,7 +410,7 @@ async fn search_snippet_can_reference_the_query_that_produced_the_ids() {
 }
 
 #[tokio::test]
-async fn send_single_cannot_deserialise_a_heterogeneous_batch() {
+async fn send_single_reads_the_response_that_answers_the_request_call() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
     mount_jmap(
@@ -444,18 +444,23 @@ async fn send_single_cannot_deserialise_a_heterogeneous_batch() {
     request.query_email().filter(email_query::Filter::text("foo"));
     request.get_search_snippet().email_id("M44200ec123de277c0c1ce69c");
 
-    // `send_single::<SearchSnippetGetResponse>` pops the *last* response but
-    // still deserialises the whole `methodResponses` array as
-    // `SingleMethodResponse<SearchSnippetGetResponse>`, so the leading
-    // `Email/query` body fails first and the batch errors out even though the
-    // snippet response itself is perfectly well formed.
-    let err = request
+    // `send_single` deserialises only the response that answers the call it is
+    // asking for — here `s1`, the `SearchSnippet/get` — so the leading
+    // `Email/query` body, a perfectly valid response of a *different* type,
+    // does not poison the read. It used to parse every response as `T` and fail
+    // the whole batch (Finding #49).
+    let response = request
         .send_single::<jmap_client::email::search_snippet::SearchSnippetGetResponse>()
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, Error::Parse(_)),
-        "expected Error::Parse, got {err:?}"
+        .expect("the response that answers the call must be readable");
+
+    assert_eq!(response.account_id(), ACCOUNT_ID);
+    assert_eq!(response.list().len(), 3);
+    assert_eq!(
+        response
+            .snippet("M7bcbcb0b58d7729686e83d99")
+            .and_then(|s| s.subject()),
+        Some("The <mark>Foo</mark>sball competition")
     );
 }
 

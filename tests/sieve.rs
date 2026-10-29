@@ -279,6 +279,56 @@ async fn sieve_script_create_uploads_then_creates_and_activates() {
 }
 
 #[tokio::test]
+async fn sieve_script_create_with_the_implicit_activate_response_returns_the_created_script() {
+    let server = MockServer::start().await;
+    let client = sieve_client(&server).await;
+    mount_upload(&server, UPLOADED_BLOB_ID).await;
+    // draft-ietf-jmap-sieve-12 §2.2 wants the activated script reported in the
+    // answer; a server may report it as a *second* `SieveScript/set` response,
+    // since RFC 8620 §3.2 lets one call return 1-or-more responses under the
+    // *same* call id and §3.4 keeps them in processing order — the shape
+    // RFC 8621 §7.5.1 spells out for EmailSubmission/set. Either way the helper
+    // must read the create result, not the tail.
+    mount_jmap(
+        &server,
+        jmap_response(
+            vec![
+                inv(
+                    "SieveScript/set",
+                    "s0",
+                    created(json!({
+                        "id": "dd1b164f-8cdc-448c-9f54",
+                        "name": "myscript",
+                        "blobId": UPLOADED_BLOB_ID,
+                        "isActive": false
+                    })),
+                ),
+                inv(
+                    "SieveScript/set",
+                    "s0",
+                    updated(json!({ "isActive": true })),
+                ),
+            ],
+            SESSION_STATE,
+        ),
+    )
+    .await;
+
+    let script = client
+        .sieve_script_create("myscript", SCRIPT.as_bytes().to_vec(), true)
+        .await
+        .expect("the implicit activation must not shadow the create result");
+
+    assert_eq!(script.id(), Some("dd1b164f-8cdc-448c-9f54"));
+    assert_eq!(script.name(), Some("myscript"));
+    assert_eq!(script.blob_id(), Some(UPLOADED_BLOB_ID));
+    assert!(
+        !script.is_active(),
+        "the primary body reports the create, not the implicit activation"
+    );
+}
+
+#[tokio::test]
 async fn sieve_script_create_without_activate_omits_the_argument() {
     let server = MockServer::start().await;
     let client = sieve_client(&server).await;

@@ -64,15 +64,11 @@ async fn mount_one(server: &MockServer, name: &str, body: Value) {
     .await
 }
 
-/// A `PushSubscription/get` result envelope.
-///
-/// RFC 8620 §7.2.1 says the method does *not* return a `state` argument, but
-/// the crate's generic `GetResponse.state` is a required `String`, so the
-/// fixture must supply one or the response will not deserialise (recorded as a
-/// Finding).
+/// A `PushSubscription/get` result envelope, exactly as RFC 8620 §7.2.1 defines
+/// the method: `list` and `notFound` only. The method does *not* return a
+/// `state` argument, so the fixture does not invent one.
 fn push_get_body(list: Vec<Value>, not_found: Vec<&str>) -> Value {
     json!({
-        "state": "0",
         "list": list,
         "notFound": not_found
     })
@@ -138,7 +134,7 @@ async fn push_subscription_get_returns_the_rfc_example_list() {
 
     let mut request = client.build();
     request.get_push_subscription().ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
-    let mut response = request.send_get_push_subscription().await.unwrap();
+    let response = request.send_get_push_subscription().await.unwrap();
 
     assert_eq!(response.list().len(), 2);
     assert!(response.not_found().is_empty());
@@ -175,7 +171,55 @@ async fn push_subscription_get_returns_the_rfc_example_list() {
         body["methodCalls"][0][1].get("accountId").is_none(),
         "RFC 8620 §7.2.1: the request must not carry an accountId: {body}"
     );
-    assert_eq!(response.take_state(), "0");
+    // RFC 8620 §7.2.1: the response carries no `state` either, and the generic
+    // `GetResponse` reads its absence as the empty string.
+    assert_eq!(response.state(), "");
+}
+
+#[tokio::test]
+async fn push_subscription_get_parses_a_compliant_response_with_no_state_member() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    // RFC 8620 §7.2.1: of `PushSubscription/get` — "It also does *not* return a
+    // 'state' argument", and the RFC's own example response carries `list` and
+    // `notFound` and nothing else. A response copied from the RFC must parse;
+    // it used to fail with `missing field "state"` (Finding #66), which made the
+    // method unusable against a compliant server.
+    mount_one(
+        &server,
+        "PushSubscription/get",
+        json!({
+            "list": [{
+                "id": "e50b2c1d-9553-41a3-b0a7-a7d26b599ee1",
+                "deviceClientId": "b37ff8001ca0",
+                "verificationCode": "b210ef734fe5f439c1ca386421359f7b",
+                "expires": "2018-07-31T00:13:21Z"
+            }],
+            "notFound": []
+        }),
+    )
+    .await;
+
+    let mut request = client.build();
+    request.get_push_subscription().ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
+    let response = request
+        .send_get_push_subscription()
+        .await
+        .expect("a §7.2.1 response without a `state` member must deserialise");
+
+    assert_eq!(
+        response.state(),
+        "",
+        "an absent `state` reads back as the empty string"
+    );
+    assert_eq!(response.list().len(), 1);
+    assert_eq!(
+        response.list()[0].id(),
+        Some("e50b2c1d-9553-41a3-b0a7-a7d26b599ee1")
+    );
+    assert_eq!(response.list()[0].expires(), Some(1_532_996_001));
+    assert!(response.list()[0].types().is_none());
+    assert!(response.not_found().is_empty());
 }
 
 #[tokio::test]
