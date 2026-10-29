@@ -531,12 +531,46 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
       The P3-followup flake is fixed (box above). New contract facts recorded
       as Findings 78–84.
 
-### P8 — Unit tests: pure logic in src  ⬜
-- [ ] lib.rs: URI/DataType/Method serde + Display round-trips, Error variants
-- [ ] core/session.rs: URLPart::parse edge cases, capability accessors
-- [ ] core/error.rs: ProblemDetails/MethodError/SetError shapes
-- [ ] filters & comparators per domain (email/mailbox/principal/submission/sieve)
-- [ ] Verify + commit
+### P8 — Unit tests: pure logic in src  ✅ (scope re-cut, see note)
+
+The 80% goal was already met at P7 (80.25%), so P8 was re-cut from "the
+coldest modules per the original boxes" to "the coldest *pure* logic the
+integration batches structurally cannot reach" — read off the P7 delta, which
+left `core/response.rs` at 31.70% and `email/query.rs` at 21.38% because
+their surface is per-method-variant and per-filter-condition code.
+
+- [x] `lib.rs`: `URI::as_ref` + `Display for DataType` verified against each
+      variant's own `#[serde(rename)]` (not a hand-copied table), `Display`
+      for every `Error` variant, and the `From<T> for Error` impls.
+      **49.32% → 100.00%**
+- [x] `core/error.rs`: `Display for ProblemDetails` over the RFC 8620
+      §3.6.1.1 problem examples (all four `JMAPError` URIs + `Other`),
+      optional `status`/`title`/`detail` composition, `Display for
+      MethodError`, `SetError` shapes. **72.50% → 99.58%**
+- [x] `core/response.rs`: the `Response` envelope accessors, the
+      `TaggedMethodResponse::unwrap_*` family (all 37 accessors driven
+      through both the method-error arm and the type-mismatch arm via one
+      macro), and the `visit_seq` guards for a malformed envelope.
+      **31.70% → 99.61%**
+- [x] `email/query.rs`: all 24 `Filter` variants serialising under their own
+      one-key form (RFC 8621 §4.4.1), `Comparator` property names
+      (§4.4.2), keyword-carrying comparators, header-filter arity, and
+      `isAscending`/`collation` mutation. **21.38% → 100.00%**
+- [x] `core/mod.rs`: `RequestParams::new` keeps what it is given.
+      **0.00% → 100.00%**
+- [x] Verify + commit — 80 in-crate unit tests green (up from 7), full client
+      suite 385 green, mock 81 green, clippy clean in all five files,
+      **TOTAL 80.25% → 90.19% lines**.
+
+**Not done from the original P8 boxes** (deliberately re-scoped, still open
+for P9): `core/session.rs` `URLPart::parse` edge cases and capability
+accessors (70.72%, mostly already driven by the integration batches), and
+filters/comparators for mailbox / principal / submission / sieve — only the
+`email` one was cold enough to justify a unit sweep; the others are at
+78–94% from P4–P6.
+
+All tests are pure: no `MockServer`, no sockets, no `async`. Every fixture is
+RFC-verbatim text with the section cited in its doc comment.
 
 ### P9 — Gap closing to ≥ 80%  ⬜
 - [ ] Coverage report analysis; targeted tests for remaining cold spots
@@ -557,6 +591,7 @@ what it needs. An unmatched request gets wiremock's 404, which surfaces as
 | 6 | 2026-10-28 | P5: submission / identity / vacation wiremock integration tests — `tests/email_submission.rs` (27), `tests/identity.rs` (22), `tests/vacation_response.rs` (18). Drives every `Client::email_submission_*` / `Client::identity_*` / `Client::vacation_response_*` helper plus the matching `Request::` builders and `unwrap_*` accessors against RFC-verbatim 8621 §6/§7/§8 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **59.14%** lines (6953 instr., 4112 covered) — **+12.83 pp / +892 lines** over P4's 46.31% | **212 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 new) · mock-jmap 41+35+4 pass | Verified: `cargo test -p jmap-client` green (212), `cargo test -p mock-jmap` green (80), `cargo clippy -p jmap-client --all-targets` clean for `tests/` (all 7 warnings are the pre-existing `mock-jmap` lib ones — none in `src/` or `tests/`), coverage summary lists only `src/` rows. All 13 target modules went from 0.00%; `email_submission/query.rs` and `vacation_response/get.rs` reached 100%. No `src/` file was modified. New contract facts recorded as Findings 53–65. |
 | 7 | 2026-10-29 | P6: sieve / principal / push_subscription / blob wiremock integration tests — `tests/principal.rs` (25), `tests/sieve.rs` (22), `tests/push_subscription.rs` (15), `tests/blob.rs` (12). Drives every `Client::sieve_script_*` / `Client::principal_*` / `Client::push_subscription_*` helper plus `Client::{upload,download,blob_copy}`, the matching `Request::` builders and `unwrap_*` accessors, against RFC 8620 §6.1–§6.3/§7.2, draft-ietf-jmap-sieve-12 §2 and RFC 9670 §4 fixtures; rich happy paths plus at least one error path per method family, each test asserting the method name went on the wire. | **75.64%** lines (6953 instr., 5259 covered) — **+16.50 pp / +1147 lines** over P5's 59.14% | **286 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 new) · mock-jmap 41 P2 + 35 P1 + 4 doctests pass, 1 known flake | Verified: `cargo test -p jmap-client` green (286), `cargo llvm-cov --all-targets --ignore-filename-regex "mock-jmap\|tests" --summary-only` lists only `src/` rows, `cargo test -p mock-jmap` green apart from the pre-existing WS-handshake flake of the P3-followup box (Finding #77). 18 of the 20 target modules went from 0.00%; `blob/copy.rs` and `sieve/validate.rs` reached 100%. No `src/` file was modified. Regions 56.93% → 73.14%, functions 57.85% → 73.97%. New contract facts recorded as Findings 66–77. The flake reproduces at the same rate with and without the P6 files (4/9 vs 2/5 full-suite runs), confirming it is independent of this increment. |
 | 8 | 2026-10-29 | P7: push-stream integration tests — `tests/websocket.rs` (15) + `tests/event_source.rs` (11), plus the P3-followup fix of the mock's WS-handshake write. Drives `Client::{connect_ws,send_ws,enable_push_ws,disable_push_ws,ws_ping,event_source}` and the RFC 8887 `WebSocketMessage` / RFC 8620 §7.3 `PushNotification`+`Changes` surfaces against the mock's own WebSocket and SSE legs: requestId correlation, `dataTypes`/`types=` filtering, `closeafter=state`, `ping` keepalive, `Last-Event-ID`/`pushState` resume, `EmailPush` delivery over WS only, `RequestError`→`ProblemDetails` vs a method error, and the not-connected error set. | **80.25%** lines (6953 instr., 5580 covered) — **+4.61 pp / +321 lines** over P6's 75.64% | **312 client pass** (7 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 new) · mock-jmap 41 P2 + 35 P1 + 1 lib + 4 doctests pass, **0 flakes** | Verified: `cargo test -p jmap-client` green ×3 (312), `cargo test -p mock-jmap` green ×5 on top of the 8 post-fix runs (13 total, 0 flakes), `cargo clippy -p jmap-client --all-targets` clean for the two new files, coverage summary lists only `src/` rows. `event_source/stream.rs` reached **100.00%**, `event_source/mod.rs` 16.67% → **97.22%**, `client_ws.rs` 0.00% → **69.27%**, `event_source/parser.rs` 71.35% → **86.98%**. Regions 73.14% → 76.80%, functions 73.97% → 76.86%. No `src/` file was modified; `mock-jmap/` was (allowed: the flake fix + keepalive/`query` observability hooks). The P3-followup box is closed — see Findings #78/#79. New contract facts recorded as Findings 78–84. |
+| 9 | 2026-10-29 | P8: in-crate `#[cfg(test)] mod tests` unit sweep of the cold *pure* logic — `core/response.rs` (32 tests), `email/query.rs` (5), `lib.rs` (10), `core/error.rs` (8), `core/mod.rs` (1). No server, no sockets, no async: RFC-verbatim fixtures (8620 §3.4/§3.6.1.1, 8621 §4.4.1/§4.4.2) deserialised in place. Drives the whole `unwrap_*` accessor family through both its method-error and its type-mismatch arm via one macro, and every `visit_seq` guard by walking all 40 `Method` variants against a payload-less envelope. | **90.19%** lines (8285 instr., 7472 covered) — **+9.94 pp / +1892 lines** over P7's 80.25% | **385 client pass** (80 lib unit + 2 crypto-provider + 28 core + 23 changes/query + 85 mail + 67 submission/identity/vacation + 74 P6 + 26 P7 + 73 new) · mock-jmap 81 pass | Verified: `cargo test -p jmap-client` green (385), `cargo test -p mock-jmap` green (81), `cargo clippy -p jmap-client --all-targets` emits **zero** warnings in the five target files (the remaining ones are pre-existing in `mock-jmap` and `tests/{principal,sieve,push_subscription}`), coverage summary lists only `src/` rows. Four of the five targets are now ≥ 99.58%; `email/query.rs`, `lib.rs` and `core/mod.rs` are at **100.00%**. Regions 76.80% → 88.84%, functions 76.86% → 86.57%. Diff is **insertions only** (2639 added, 0 deleted) — no existing non-test line was touched. New contract facts recorded as Findings 85–89. |
 
 #### P3 (part 1) per-file line-coverage delta
 
@@ -790,6 +825,46 @@ accessors of domains no batch drives), `email/query.rs` (21.38%),
 `DummyVerifier`/TLS-config arm (`client_ws.rs:~40` lines) cannot be reached
 over the mock's plain `ws://` socket without touching `src/`. P8/P9 are now
 polish, not a rescue.
+
+#### P8 per-file line-coverage delta
+
+Against the state after P7 (`80.25%` / 5580 lines covered). The instrumented
+total grew from 6953 to 8285 lines because the in-crate `mod tests` blocks
+are themselves `src/` code and are counted by the metric; the deltas below
+are read off the per-file percentages, which are unaffected by that growth.
+
+| `src/` file | before | after | Δ pp | lines covered |
+|---|---|---|---|---|
+| `core/mod.rs` | 0.00% | **100.00%** | +100.00 | 0 → 18 (+18) |
+| `email/query.rs` | 21.38% | **100.00%** | +78.62 | 72 → 338 (+266) |
+| `lib.rs` | 49.32% | **100.00%** | +50.68 | 36 → 209 (+173) |
+| `core/error.rs` | 72.50% | **99.58%** | +27.08 | 58 → 235 (+177) |
+| `core/response.rs` | 31.70% | **99.61%** | +67.91 | 136 → 1274 (+1138) |
+| **TOTAL** | **80.25%** | **90.19%** | **+9.94** | **5580 → 7472 (+1892)** |
+
+Regions 76.80% → 88.84% and functions 76.86% → 86.57% over the same
+increment. Of the +1892 covered lines, roughly 1240 are the new test bodies
+themselves and the rest is `src/` logic the tests actually exercise — the
+per-file percentages are the honest signal, and every one of the five moved
+by 27 pp or more.
+
+**Lines that cannot be reached.** `--show-missing-lines` reports **nothing**
+for `email/query.rs`, `lib.rs`, `core/mod.rs` and `core/error.rs`. The
+residual counts are llvm-cov line-attribution artefacts, not untested logic:
+
+- `core/response.rs` — 5 missed lines, none listed by `--show-missing-lines`.
+  They are the never-taken panic-message continuations of multi-line
+  `assert_eq!` invocations inside the test module itself (a macro's panic
+  path is attributed to a line past the macro's closing `)`).
+- `core/error.rs` — 1 missed line, likewise not listed. All four `JMAPError`
+  arms and `ProblemType::Other` are exercised; the count is a region-level
+  artefact on the closing brace of the nested `match` at `error.rs:185`.
+
+Two earlier unreachable lines were **eliminated** rather than documented: the
+`single_method_response_is_untagged_ok_or_error` test originally used
+`match … => panic!("must deserialise as the … arm")` guards, which can never
+execute in a passing run. Rewriting those as guarded `matches!` expressions
+asserts the same field values with no unreachable branch.
 
 ## Findings log
 
@@ -1364,3 +1439,53 @@ tests._
     socket stays open and keeps answering later requests. That is the
     contrast the tests draw against a method-level error inside a normal
     `Response`: one kills nothing, and neither closes the connection.
+
+_Discovered writing the P8 in-crate unit tests against `core/response.rs`,
+`core/error.rs`, `email/query.rs` and `lib.rs`._
+
+85. **`Response` carries `request_id`, not the RFC 8887 `requestId`.**
+    `src/core/response.rs` declares the field without a `#[serde(rename)]`, so
+    the JSON key is the snake_case `request_id`. The WebSocket envelope
+    (`client_ws::WebSocketResponse`) *does* rename to `requestId`, which is
+    what RFC 8887 §4.4.1 actually specifies. The two envelopes therefore
+    disagree with each other and the HTTP one disagrees with the RFC. A unit
+    test pins the current key so a future rename is a deliberate act rather
+    than a silent drift; nothing in the HTTP path can consume a `requestId`
+    written by a spec-following server.
+86. **`Error::Transport`'s `Display` is only reachable by building a request,
+    and that needs a crypto provider installed first.** `reqwest::Error::new`
+    is `pub(crate)`, so the only offline way to obtain a `Transport` error is
+    `Client::new().get("://not-a-valid-url").build()`. That call panics
+    unless a rustls process-default provider exists, and this crate builds
+    reqwest with `rustls-no-provider`. The test therefore calls
+    `rustls::crypto::aws_lc_rs::default_provider().install_default()` first
+    and is gated `#[cfg(feature = "websockets")]` to match the default
+    feature set. Without the install step the test aborts with "no process-level
+    CryptoProvider was found" rather than failing an assertion.
+87. **`SetResponse` has no `not_updated(id)` accessor.** A `notUpdated` entry
+    is surfaced through `updated(id)`, which returns the `SetError` as an
+    `Err` rather than exposing the record — and there is no read-only probe
+    that leaves the maps intact. Worse, `created()` / `updated()` /
+    `destroyed()` each **remove** the entry from whichever map holds it
+    (Finding #26 generalised), so a second lookup of the same id yields
+    `Error::Internal("Id … not found.")` and `take_updated_ids()` afterwards
+    returns an empty `Vec`. Tests must read each id exactly once and in a
+    deliberate order.
+88. **A payload-less method-response envelope is the only way to reach the
+    `visit_seq` missing-response guards — and it works uniformly.** Each of
+    the 40 arms in `TaggedMethodResponseVisitor::visit_seq` ends with
+    `.ok_or_else(|| serde::de::Error::custom("Expected a method response"))`,
+    which no well-formed fixture can trigger. Deserialising `["<method name>"]`
+    with the second element omitted hits exactly that closure, and because the
+    `match` is exhaustive over `Method` with no catch-all, one loop over all
+    40 variants covers every arm once. The same trick with a two-element array
+    reaches the `"Expected method call id"` guard. This took `core/response.rs`
+    from 96.07% to 99.45% in a single test.
+89. **`tungstenite::Error::Protocol` renders with a doubled prefix.**
+    `Error::WebSocket(tungstenite::Error::Protocol(ProtocolError::InvalidOpcode(9)))`
+    displays as
+    `"WebSockets error: WebSocket protocol error: Encountered invalid opcode: 9"`
+    — the crate's own `"WebSockets error: "` and tungstenite's
+    `"WebSocket protocol error: "` stacked. Any code that tries to strip or
+    match the prefix has to account for both. Pinned by the
+    `from_tungstenite_error_wraps_as_websocket_error` unit test.

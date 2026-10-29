@@ -532,3 +532,221 @@ impl Display for DataType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::error::{JMAPError, MethodErrorType, ProblemDetails, ProblemType};
+
+    /// RFC 8620 §3.2 — every capability `URI` must render through
+    /// `AsRef<str>` as the exact URN the server advertises in its session
+    /// resource. Comparing against the serde rename keeps the two in sync.
+    #[test]
+    fn uri_as_ref_matches_the_serde_rename() {
+        let cases: &[(URI, &str)] = &[
+            (URI::Core, "urn:ietf:params:jmap:core"),
+            (URI::Mail, "urn:ietf:params:jmap:mail"),
+            (URI::Submission, "urn:ietf:params:jmap:submission"),
+            (URI::VacationResponse, "urn:ietf:params:jmap:vacationresponse"),
+            (URI::Contacts, "urn:ietf:params:jmap:contacts"),
+            (URI::Calendars, "urn:ietf:params:jmap:calendars"),
+            (URI::WebSocket, "urn:ietf:params:jmap:websocket"),
+            (URI::Sieve, "urn:ietf:params:jmap:sieve"),
+            (URI::Blob, "urn:ietf:params:jmap:blob"),
+            (URI::Quota, "urn:ietf:params:jmap:quota"),
+            (URI::Principals, "urn:ietf:params:jmap:principals"),
+            (URI::PrincipalsOwner, "urn:ietf:params:jmap:principals:owner"),
+        ];
+
+        assert_eq!(cases.len(), 12, "all twelve capability URIs");
+        for (uri, urn) in cases {
+            assert_eq!(uri.as_ref(), *urn, "{uri:?} as_ref()");
+            assert_eq!(
+                serde_json::to_value(uri).unwrap(),
+                serde_json::to_value(urn).unwrap(),
+                "{uri:?} must serialise to the same URN it renders as"
+            );
+        }
+    }
+
+    /// RFC 8620 §5.2 / RFC 8621 — `Display for DataType` must agree with
+    /// the serde rename, otherwise a state string printed by a client
+    /// would not match the type name on the wire.
+    #[test]
+    fn data_type_display_matches_the_serde_rename() {
+        let cases: &[(DataType, &str)] = &[
+            (DataType::Email, "Email"),
+            (DataType::EmailDelivery, "EmailDelivery"),
+            (DataType::EmailSubmission, "EmailSubmission"),
+            (DataType::Mailbox, "Mailbox"),
+            (DataType::Thread, "Thread"),
+            (DataType::Identity, "Identity"),
+            (DataType::Core, "Core"),
+            (DataType::PushSubscription, "PushSubscription"),
+            (DataType::SearchSnippet, "SearchSnippet"),
+            (DataType::VacationResponse, "VacationResponse"),
+            (DataType::Mdn, "MDN"),
+            (DataType::Quota, "Quota"),
+            (DataType::SieveScript, "SieveScript"),
+            (DataType::Calendar, "Calendar"),
+            (DataType::CalendarEvent, "CalendarEvent"),
+            (DataType::CalendarEventNotification, "CalendarEventNotification"),
+            (DataType::AddressBook, "AddressBook"),
+            (DataType::ContactCard, "ContactCard"),
+            (DataType::FileNode, "FileNode"),
+            (DataType::Principal, "Principal"),
+            (DataType::ShareNotification, "ShareNotification"),
+            (DataType::ParticipantIdentity, "ParticipantIdentity"),
+            (DataType::CalendarAlert, "CalendarAlert"),
+        ];
+
+        assert_eq!(cases.len(), 23, "all twenty-three data types");
+        for (data_type, name) in cases {
+            assert_eq!(data_type.to_string(), *name, "{data_type:?} Display");
+            assert_eq!(
+                serde_json::to_value(data_type).unwrap(),
+                serde_json::to_value(name).unwrap(),
+                "{data_type:?} must serialise to the same name it renders as"
+            );
+        }
+    }
+
+    #[test]
+    fn error_display_for_owned_string_variants() {
+        assert_eq!(
+            Error::Internal("Response type mismatch".to_string()).to_string(),
+            "Internal error: Response type mismatch"
+        );
+        assert_eq!(
+            Error::Server("connection reset".to_string()).to_string(),
+            "Server failed: connection reset"
+        );
+    }
+
+    /// RFC 8620 §3.6 — a method-level error is reported through
+    /// `Error::Method` with the "Request failed" prefix.
+    #[test]
+    fn error_display_for_method_error() {
+        let error = Error::Method(MethodError {
+            p_type: MethodErrorType::AccountReadOnly,
+        });
+        assert_eq!(error.to_string(), "Request failed: Account read only");
+    }
+
+    /// RFC 8620 §3.6.1.1 — a problem document is reported through
+    /// `Error::Problem` with the same "Request failed" prefix, and the
+    /// nested `ProblemDetails` rendering.
+    #[test]
+    fn error_display_for_problem_details() {
+        let error = Error::Problem(Box::new(ProblemDetails::new(
+            ProblemType::JMAP(JMAPError::Limit),
+            Some(413),
+            Some("Too large".to_string()),
+            Some("request exceeded 10MB".to_string()),
+            Some("10485760".to_string()),
+            Some("req-1".to_string()),
+        )));
+        assert_eq!(
+            error.to_string(),
+            "Request failed: Limit (status 413): Too large. \
+             Details: request exceeded 10MB"
+        );
+    }
+
+    #[test]
+    fn error_display_for_set_error() {
+        let set_error =
+            serde_json::from_str::<SetError<String>>(r#"{"type": "overQuota"}"#).unwrap();
+        assert_eq!(
+            Error::Set(set_error).to_string(),
+            "Set failed: overQuota",
+            "a SetError with no description renders only its type"
+        );
+    }
+
+    #[test]
+    fn error_display_for_parse_error() {
+        let parse_error = serde_json::from_str::<()>("nope").unwrap_err();
+        let rendered = parse_error.to_string();
+        assert_eq!(
+            Error::Parse(parse_error).to_string(),
+            format!("Parse error: {rendered}"),
+            "the serde message must be carried through verbatim"
+        );
+    }
+
+    #[test]
+    fn from_impls_wrap_their_source() {
+        let error: Error = "boom".into();
+        assert!(matches!(&error, Error::Internal(s) if s == "boom"));
+
+        let error: Error = MethodError {
+            p_type: MethodErrorType::AnchorNotFound,
+        }
+        .into();
+        assert!(matches!(
+            &error,
+            Error::Method(m) if *m.error() == MethodErrorType::AnchorNotFound
+        ));
+
+        let error: Error = ProblemDetails::new(
+            ProblemType::Other("urn:example:error".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .into();
+        assert!(matches!(&error, Error::Problem(p) if p.status().is_none()));
+
+        let set_error = serde_json::from_str::<SetError<String>>(
+            r#"{"type": "notFound", "description": "No such mailbox"}"#,
+        )
+        .unwrap();
+        let error: Error = set_error.into();
+        assert_eq!(error.to_string(), "Set failed: notFound: No such mailbox");
+
+        let parse_error = serde_json::from_str::<()>("][").unwrap_err();
+        let error: Error = parse_error.into();
+        assert!(matches!(&error, Error::Parse(_)));
+    }
+
+    /// The `websockets` feature adds a `WebSocket` error arm; its
+    /// conversion and rendering are only compiled when the feature is on.
+    #[cfg(feature = "websockets")]
+    #[test]
+    fn from_tungstenite_error_wraps_as_websocket_error() {
+        use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+
+        let error: Error = WsError::Protocol(ProtocolError::InvalidOpcode(9)).into();
+        assert_eq!(
+            error.to_string(),
+            "WebSockets error: WebSocket protocol error: Encountered invalid opcode: 9"
+        );
+    }
+
+    /// `Error::Transport` wraps a `reqwest::Error`, which reqwest only
+    /// ever builds itself (`Error::new` is `pub(crate)`). A unit test can
+    /// still obtain one from the request builder without touching a
+    /// socket, which is what this covers.
+    #[cfg(feature = "websockets")]
+    #[test]
+    fn from_reqwest_error_wraps_as_transport_error() {
+        // reqwest is configured with `rustls-no-provider`, so a
+        // process-wide crypto provider has to exist before a Client can
+        // be constructed. Installing it is idempotent.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let reqwest_error = reqwest::Client::new()
+            .get("://not-a-valid-url")
+            .build()
+            .expect_err("an invalid URL must fail to build a request");
+        let error: Error = reqwest_error.into();
+        assert!(matches!(&error, Error::Transport(_)));
+        assert!(
+            error.to_string().starts_with("Transport error: "),
+            "got {error}"
+        );
+    }
+}
