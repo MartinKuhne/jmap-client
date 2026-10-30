@@ -158,3 +158,148 @@ impl<O: SetObject> CopyResponse<O> {
         self.not_created.as_ref().map(|map| map.keys())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the copy request builder and the copy response
+    //! accessors (RFC 8621 §4.7).
+
+    use super::*;
+    use crate::{email::Email, Get, Method, Set};
+    use serde_json::json;
+
+    /// RFC 8621 §4.7 — the request starts as the minimal shape (source
+    /// account, destination account, empty create map, original kept) and
+    /// every optional member is written only once the caller asks for it.
+    #[test]
+    fn copy_request_starts_minimal_and_grows_through_the_builder() {
+        let mut request = CopyRequest::<Email<Set>>::new(
+            RequestParams::new("unused", Method::CopyEmail, 0),
+            "ue150411c".to_string(),
+        );
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "fromAccountId": "ue150411c",
+                "accountId": "unused",
+                "create": {},
+                "onSuccessDestroyOriginal": false,
+            }),
+            "the two state preconditions are skipped until they are set"
+        );
+
+        request
+            .account_id("u6c6c41ac")
+            .if_from_in_state("7ee7e9263a6d")
+            .if_in_state("5a0d2447ed26")
+            .on_success_destroy_original(true)
+            .destroy_from_if_in_state("7ee7e9263a6d");
+
+        // `create` hands back the new object so the caller can fill it in
+        let created = request.create("k45");
+        created.mailbox_ids(["a"]);
+        created.keywords(["keyword"]);
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "fromAccountId": "ue150411c",
+                "ifFromInState": "7ee7e9263a6d",
+                "accountId": "u6c6c41ac",
+                "ifInState": "5a0d2447ed26",
+                "create": {
+                    "k45": {
+                        "id": "k45",
+                        "mailboxIds": { "a": true },
+                        "keywords": { "keyword": true }
+                    }
+                },
+                "onSuccessDestroyOriginal": true,
+                "destroyFromIfInState": "7ee7e9263a6d"
+            }),
+            "the RFC §4.7 request shape, member for member"
+        );
+    }
+
+    /// `account_id` overrides the account the builder was seeded from,
+    /// which is how a caller copies into an account other than the
+    /// session default.
+    #[test]
+    fn account_id_overrides_the_params_account() {
+        let mut request = CopyRequest::<Email<Set>>::new(
+            RequestParams::new("session-default", Method::CopyEmail, 1),
+            "source".to_string(),
+        );
+        assert_eq!(request.account_id, "session-default");
+        request.account_id("chosen");
+        assert_eq!(request.account_id, "chosen");
+        assert_eq!(request.if_from_in_state, None);
+        assert_eq!(request.if_in_state, None);
+    }
+
+    /// RFC 8621 §4.7 — `take_created` drains the whole `created` map
+    /// into a `Vec`, discarding the creation ids. A second call reports
+    /// `None`: the records are gone, not merely empty.
+    #[test]
+    fn take_created_drains_the_created_map() {
+        let mut response: CopyResponse<Email<Get>> = serde_json::from_value(json!({
+            "fromAccountId": "ue150411c",
+            "accountId": "u6c6c41ac",
+            "oldState": "7ee7e9263a6d",
+            "newState": "5a0d2447ed26",
+            "created": {
+                "k45": {
+                    "id": "M138f9954a5cd2423daeafa55",
+                    "blobId": "G6b9fb047cba722c48c611e79233d057c6b0b74e8",
+                    "threadId": "T2f242ea424a4079a",
+                    "size": 11721
+                }
+            },
+            "notCreated": null
+        }))
+        .unwrap();
+
+        assert_eq!(response.from_account_id(), "ue150411c");
+        assert_eq!(response.account_id(), "u6c6c41ac");
+        assert_eq!(response.old_state(), Some("7ee7e9263a6d"));
+        assert_eq!(response.new_state(), "5a0d2447ed26");
+
+        let taken = response
+            .take_created()
+            .expect("the response carried records");
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].id(), Some("M138f9954a5cd2423daeafa55"));
+        assert_eq!(taken[0].thread_id(), Some("T2f242ea424a4079a"));
+        assert_eq!(taken[0].size(), 11721);
+
+        assert!(
+            response.take_created().is_none(),
+            "the map is taken, not emptied"
+        );
+        assert!(response.created_ids().is_none());
+    }
+
+    /// A response that never carried a `created` member drains to `None`
+    /// rather than to an empty `Vec`, so callers can tell "no member" from
+    /// "member with no records".
+    #[test]
+    fn take_created_reports_none_when_the_member_is_absent() {
+        let mut response: CopyResponse<Email<Get>> = serde_json::from_value(json!({
+            "fromAccountId": "ue150411c",
+            "accountId": "u6c6c41ac",
+            "newState": "5a0d2447ed26",
+            "notCreated": {
+                "k45": { "type": "notFound", "description": "Email not found" }
+            }
+        }))
+        .unwrap();
+
+        assert!(response.old_state().is_none(), "`oldState` is optional");
+        assert!(response.take_created().is_none());
+        assert_eq!(
+            response.created("k45").unwrap_err().to_string(),
+            "Set failed: notFound: Email not found"
+        );
+    }
+}

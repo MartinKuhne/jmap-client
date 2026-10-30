@@ -535,18 +535,58 @@ impl<'x> Request<'x> {
         self.client.send_ws(self).await
     }
 
+    /// Sends the request and returns the body of the *primary* method response,
+    /// or turns a method-level error into [`Error::Method`].
+    ///
+    /// The primary response is the **first** one that carries this request's
+    /// call id, not the last one in the array. RFC 8620 §3.2 lets a single call
+    /// answer with several responses under the *same* call id — "a method may
+    /// return 1 or more responses, as it may make implicit calls to other
+    /// methods; all responses initiated by this method call get the same method
+    /// call id in the response" — and RFC 8620 §3.4 keeps them in processing
+    /// order, so the primary answer comes first and the implicit one after it.
+    /// RFC 8621 §7.5.1 shows exactly this for `EmailSubmission/set`: "Note that
+    /// there are two responses due to the implicit "Email/set" call, but both
+    /// have the same method call id as they are due to the same call in the
+    /// request". RFC 8620 §5.4 (`/copy` with `onSuccessDestroyOriginal`, which
+    /// RFC 8621 §4.7 adopts for `Email/copy`) has the same shape. Reading the
+    /// tail instead hands the caller the implicit body and fails an operation
+    /// that succeeded.
+    ///
+    /// Only the selected response's arguments are deserialised into `T`; the
+    /// others are read as opaque JSON. An implicit secondary response is a
+    /// *different* method with a *different* body, so parsing every one of them
+    /// as `T` would fail the envelope before the selection could happen.
     #[maybe_async::maybe_async]
     pub async fn send_single<T>(self) -> crate::Result<T>
     where
         T: DeserializeOwned,
     {
-        let response: Response<SingleMethodResponse<T>> = self.client.send(&self).await?;
-        match response
-            .unwrap_method_responses()
-            .pop()
-            .ok_or_else(|| Error::Internal("Server returned no results".to_string()))?
-        {
-            SingleMethodResponse::Ok((_, response, _)) => Ok(response),
+        // The call id this request sent. Every helper builds a single method
+        // call (`s0`); when a caller does add several, the last one is the
+        // result they are asking for.
+        let call_id = self.method_calls.last().map(|call| call.2.clone());
+
+        let response: Response<SingleMethodResponse<serde_json::Value>> =
+            self.client.send(&self).await?;
+        let mut responses = response.unwrap_method_responses();
+
+        let primary = responses
+            .iter()
+            .position(|response| Some(response.call_id()) == call_id.as_deref())
+            // A server that did not echo the call id still answered, so keep
+            // the first body rather than throwing a well-formed one away.
+            .or_else(|| (!responses.is_empty()).then_some(0))
+            .ok_or_else(|| Error::Internal("Server returned no results".to_string()))?;
+
+        match responses.remove(primary) {
+            SingleMethodResponse::Ok((_, body, _)) => {
+                // The selected body is re-read from its JSON text rather than
+                // converted with `from_value`: a few of the crate's
+                // `Deserialize` impls — `Role` in particular (Finding #90) —
+                // read borrowed text, which a `Value` cannot hand out.
+                Ok(serde_json::from_str(&body.to_string())?)
+            }
             SingleMethodResponse::Error((_, err, _)) => Err(err.into()),
         }
     }
@@ -626,7 +666,7 @@ mod tests {
             }),
             "urn:ietf:params:jmap:submission" => json!({
                 "maxDelayedSend": 0,
-                "submissionExtensions": []
+                "submissionExtensions": {}
             }),
             "urn:ietf:params:jmap:websocket" => json!({
                 "url": "wss://example.com/jmap/ws",

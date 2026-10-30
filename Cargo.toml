@@ -1,7 +1,7 @@
 [package]
 name = "jmap-client"
 description = "JMAP client library for Rust"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 authors = [ "Stalwart Labs LLC <hello@stalw.art>"]
 license = "Apache-2.0 OR MIT"
@@ -11,9 +11,15 @@ keywords = ["jmap", "email", "mail", "e-mail"]
 categories = ["email"]
 readme = "README.md"
 resolver = "2"
+# The two push-stream tests drive the `mock-jmap` workspace member, which is
+# `publish = false` test infrastructure. Cargo normalises that path dev-dependency
+# away when packaging, so shipping these two files would publish integration tests
+# that cannot compile against the crates.io tarball. They remain in the repository
+# and run from a checkout; they are simply not part of the published package.
+exclude = ["tests/websocket.rs", "tests/event_source.rs"]
 
 [dependencies]
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"], optional = true}
 tokio = { version = "1.51", default-features = false, features = ["io-util"], optional = true }
 futures-util = { version = "0.3", optional = true}
@@ -28,9 +34,6 @@ parking_lot = "0.12"
 encodify = "1.0"
 maybe-async = "0.2"
 
-[dev-dependencies]
-tokio = { version = "1.51", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "time", "io-util"] }
-
 [features]
 default = ["async", "websockets", "aws_lc_rs"]
 async = ["futures-util", "async-stream", "reqwest/stream"]
@@ -40,6 +43,16 @@ ring = ["rustls/ring"]
 aws_lc_rs = ["rustls/aws_lc_rs"]
 aws-lc-rs = ["aws_lc_rs"]
 debug = []
+
+[workspace]
+members = [".", "mock-jmap"]
+
+[dev-dependencies]
+# Shared RFC-compliant JMAP mock server used by the integration tests.
+mock-jmap = { path = "mock-jmap" }
+# HTTP mock for the P3-P6 wiremock-based integration tests (hybrid strategy).
+wiremock = "0.6"
+tokio = { version = "1.51", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "time", "io-util"] }
 
 [lib]
 doctest = false

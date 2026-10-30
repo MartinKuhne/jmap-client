@@ -1,0 +1,28 @@
+[package]
+name = "mock-jmap"
+description = "RFC-compliant in-memory JMAP mock server, shared test infrastructure for jmap-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1.51", default-features = false, features = [
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "time",
+    "macros",
+    "io-util",
+    "sync",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ahash = { version = "0.8", features = ["serde"] }
+futures-util = "0.3"
+# Pinned to the same major/minor the library uses so the two feature sets unify.
+# `handshake` is what the mock's server side needs (accept_hdr_async); `connect`
+# is what the P2 self-tests use to drive a real client against it.
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+    "handshake",
+    "connect",
+] }

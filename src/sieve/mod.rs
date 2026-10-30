@@ -50,12 +50,22 @@ pub struct SieveScript<State = Get> {
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SetArguments {
+    /// draft-ietf-jmap-sieve-12 §2.2 — `onSuccessActivateScript: Id|null` is
+    /// the *only* extra argument `SieveScript/set` defines, and the three
+    /// states of that one member are the whole activation model:
+    ///
+    /// * absent — "the currently active SieveScript (if any) will remain as such";
+    /// * `null` — "the currently active SieveScript (if any) will be deactivated";
+    /// * an id, or a `#<createId>` creation-reference — activate that script.
+    ///
+    /// The outer `Option` is what distinguishes "the caller said nothing" from
+    /// "the caller asked for a null": `skip_serializing_if` drops only the outer
+    /// `None`, so an inner `None` still rides the wire as an explicit JSON null.
+    /// There is deliberately no `onSuccessDeactivateScript` member; it does not
+    /// exist in the draft, and a compliant server would ignore it.
     #[serde(rename = "onSuccessActivateScript")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_success_activate_script: Option<String>,
-    #[serde(rename = "onSuccessDeactivateScript")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    on_success_deactivate_script: Option<bool>,
+    on_success_activate_script: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]
@@ -103,4 +113,47 @@ impl ChangesObject for SieveScript<Set> {
 
 impl ChangesObject for SieveScript<Get> {
     type ChangesResponse = ();
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure wire-name table of the sieve
+    //! `Property` enum and for the `Object` account-scoping flag
+    //! (draft-ietf-jmap-sieve-12 §2.1, RFC 8620 §3.1).
+
+    use super::*;
+    use serde_json::json;
+
+    /// draft-ietf-jmap-sieve-12 §2.1 — `Display` and `Serialize` must
+    /// agree on the wire name of every variant, and reading that name
+    /// back must land on the same variant.
+    #[test]
+    fn property_display_and_serde_round_trip_every_variant() {
+        let cases: &[(Property, &str)] = &[
+            (Property::Id, "id"),
+            (Property::Name, "name"),
+            (Property::BlobId, "blobId"),
+            (Property::IsActive, "isActive"),
+        ];
+
+        assert_eq!(cases.len(), 4, "the draft defines four script properties");
+        for (property, wire) in cases {
+            assert_eq!(property.to_string(), *wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(property).unwrap(), json!(*wire));
+            assert_eq!(
+                serde_json::from_value::<Property>(json!(*wire)).unwrap(),
+                *property,
+                "{wire} must round-trip back to the variant it came from"
+            );
+        }
+    }
+
+    /// RFC 8620 §3.1 — sieve scripts belong to an account, and the flag
+    /// is carried by the type rather than the call, so `<Get>` and
+    /// `<Set>` must both report `true`.
+    #[test]
+    fn both_sieve_script_flavours_require_an_account_id() {
+        assert!(<SieveScript<Set> as Object>::requires_account_id());
+        assert!(<SieveScript<Get> as Object>::requires_account_id());
+    }
 }

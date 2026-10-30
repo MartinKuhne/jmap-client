@@ -15,10 +15,12 @@ use crate::{client::Client, core::session::URLPart};
 
 // `blocking` takes precedence over `async`: it enables maybe-async's `is_sync`
 // switch, which makes this API synchronous, so the async client must not be
-// imported alongside it (both are named `HttpClient`).
+// imported alongside it (both are named `HttpClient`). With `blocking` off the
+// async client is the only one the maybe-async API can be built on, whether or
+// not the `async` feature itself is on.
 #[cfg(feature = "blocking")]
 use reqwest::blocking::Client as HttpClient;
-#[cfg(all(feature = "async", not(feature = "blocking")))]
+#[cfg(not(feature = "blocking"))]
 use reqwest::Client as HttpClient;
 
 impl Client {

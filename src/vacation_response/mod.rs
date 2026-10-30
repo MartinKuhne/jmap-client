@@ -116,3 +116,48 @@ impl ChangesObject for VacationResponse<Set> {
 impl ChangesObject for VacationResponse<Get> {
     type ChangesResponse = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the pure wire-name table of the vacation-response
+    //! `Property` enum and for the `Object` account-scoping flag
+    //! (RFC 8621 §8.1, RFC 8620 §3.1).
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §8.1 — `Display` and `Serialize` must agree on the wire
+    /// name of every variant, and reading that name back must land on the
+    /// same variant.
+    #[test]
+    fn property_display_and_serde_round_trip_every_variant() {
+        let cases: &[(Property, &str)] = &[
+            (Property::Id, "id"),
+            (Property::IsEnabled, "isEnabled"),
+            (Property::FromDate, "fromDate"),
+            (Property::ToDate, "toDate"),
+            (Property::Subject, "subject"),
+            (Property::TextBody, "textBody"),
+            (Property::HtmlBody, "htmlBody"),
+        ];
+
+        assert_eq!(cases.len(), 7, "seven vacation-response properties");
+        for (property, wire) in cases {
+            assert_eq!(property.to_string(), *wire, "{property:?} Display");
+            assert_eq!(serde_json::to_value(property).unwrap(), json!(*wire));
+            assert_eq!(
+                serde_json::from_value::<Property>(json!(*wire)).unwrap(),
+                *property,
+                "{wire} must round-trip back to the variant it came from"
+            );
+        }
+    }
+
+    /// RFC 8621 §8 — the vacation response is a per-account singleton,
+    /// so it is account scoped whichever flavour the caller holds.
+    #[test]
+    fn both_vacation_response_flavours_require_an_account_id() {
+        assert!(<VacationResponse<Set> as Object>::requires_account_id());
+        assert!(<VacationResponse<Get> as Object>::requires_account_id());
+    }
+}

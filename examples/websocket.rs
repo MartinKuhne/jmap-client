@@ -83,10 +83,13 @@ async fn websocket() {
         .mailbox_update_sort_order(&mailbox_id, 1)
         .await
         .unwrap();
-    if let Some(WebSocketMessage::PushNotification(PushObject::StateChange { changed })) =
-        stream_rx.recv().await
-    {
-        println!("Received changes: {:?}", changed);
+    if let Some(WebSocketMessage::PushNotification(notification)) = stream_rx.recv().await {
+        if let PushObject::StateChange { changed } = &notification.push {
+            println!("Received changes: {:?}", changed);
+        }
+        // RFC 8887 §5.2: keep the pushState, it is what resumes push after a
+        // reconnect (RFC 8620 §7.1 Last-Event-ID).
+        println!("Last push state: {:?}", notification.push_state);
     } else {
         unreachable!()
     }

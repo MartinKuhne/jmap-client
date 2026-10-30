@@ -46,3 +46,26 @@ pub trait Object: Sized {
     type Property: Display + Serialize + for<'de> Deserialize<'de>;
     fn requires_account_id() -> bool;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `RequestParams` is the little bundle every method builder is
+    /// constructed from: the account it targets, the JMAP method name and
+    /// the call id used to match request to response (RFC 8620 §3.5).
+    #[test]
+    fn request_params_keep_what_they_are_given() {
+        let params = RequestParams::new("u33084183", Method::GetMailbox, 1);
+        assert_eq!(params.account_id, "u33084183");
+        assert!(matches!(params.method, Method::GetMailbox));
+        assert_eq!(params.call_id, 1);
+
+        // `impl Into<String>` accepts anything string-like without a copy
+        let owned: String = "ue411d190".into();
+        let params = RequestParams::new(owned, Method::QueryEmail, 0);
+        assert_eq!(params.account_id, "ue411d190");
+        assert!(matches!(params.method, Method::QueryEmail));
+        assert_eq!(params.call_id, 0, "call ids start at zero");
+    }
+}

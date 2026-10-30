@@ -149,3 +149,79 @@ impl<O: ChangesObject> ChangesResponse<O> {
         self.created.len() + self.updated.len() + self.destroyed.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the generic `*/changes` request builder
+    //! (RFC 8620 §5.2) and its result-reference helpers (§3.6).
+
+    use super::*;
+    use serde_json::json;
+
+    const SINCE: &str = "51a0c6b1-9c94-4b5a-9c69-1f0a2b3c4d5e";
+
+    /// RFC 8620 §5.2 — `sinceState` arrives through the constructor,
+    /// `maxChanges` is skipped until it is asked for, and `account_id`
+    /// overrides the account the params carried.
+    #[test]
+    fn account_id_setter_replaces_the_account_the_params_carried() {
+        let mut request = ChangesRequest::new(
+            RequestParams::new("u33084183", Method::ChangesMailbox, 2),
+            SINCE.to_string(),
+        );
+        assert_eq!(request.account_id, "u33084183");
+        assert_eq!(request.since_state, SINCE);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "accountId": "u33084183",
+                "sinceState": SINCE
+            }),
+            "`maxChanges` is skipped when unset"
+        );
+
+        let owned: String = "ue411d190".into();
+        request.account_id(owned);
+        assert_eq!(request.account_id, "ue411d190");
+
+        // the setter hands back `&mut Self`, so calls chain
+        request.account_id("a").account_id("b");
+        assert_eq!(request.account_id, "b");
+
+        request.max_changes(16);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "accountId": "b",
+                "sinceState": SINCE,
+                "maxChanges": 16
+            })
+        );
+    }
+
+    /// RFC 8620 §3.6 — the three helpers name the three list members of
+    /// a `/changes` response and carry the request's own method name and
+    /// call id, so a follow-up `*/get` can reference them by `resultOf`.
+    #[test]
+    fn the_reference_helpers_name_the_changes_lists() {
+        let request = ChangesRequest::new(
+            RequestParams::new("u33084183", Method::ChangesMailbox, 7),
+            SINCE.to_string(),
+        );
+
+        for (reference, path) in [
+            (request.created_reference(), "/created"),
+            (request.updated_reference(), "/updated"),
+            (request.updated_properties_reference(), "/updatedProperties"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(reference).unwrap(),
+                json!({
+                    "resultOf": "s7",
+                    "name": "Mailbox/changes",
+                    "path": path
+                })
+            );
+        }
+    }
+}

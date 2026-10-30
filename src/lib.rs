@@ -91,9 +91,10 @@
 //!     assert_eq!(email.keywords(), ["$draft"]);
 //!
 //!     // Fetch only the updated properties of all mailboxes that changed
-//!     // since a state.
+//!     // since a state. RFC 8620 §5.2: with `sinceState` present, `maxChanges`
+//!     // MUST be greater than 0, so a compliant server rejects 0.
 //!     let mut request = client.build();
-//!     let changes_request = request.changes_mailbox("n").max_changes(0);
+//!     let changes_request = request.changes_mailbox("n").max_changes(16);
 //!     let properties_ref = changes_request.updated_properties_reference();
 //!     let updated_ref = changes_request.updated_reference();
 //!     request
@@ -184,6 +185,7 @@
 pub mod blob;
 pub mod client;
 pub mod core;
+mod crypto;
 pub mod email;
 pub mod email_submission;
 // EventSource push streams need an async runtime (`bytes_stream()` +
@@ -341,54 +343,146 @@ pub enum Method {
     Error,
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Hash, Clone)]
+/// A JMAP data type name.
+///
+/// RFC 8620 §7.2 types `types` as `String[]|null`: a list of JMAP data type
+/// names. A server is free to report a type this crate has never heard of —
+/// any extension's data type, or an application-defined one such as the
+/// `"Todo"` of RFC 8620 §7.2.3 — so [`DataType::Other`] carries an unmodelled
+/// name verbatim instead of letting one unknown entry fail the whole response.
+///
+/// The explicit discriminants are preserved. They can no longer be read with an
+/// `as` cast, because an enum with a data-carrying variant is not field-less
+/// (E0605); `#[repr(u8)]` is what makes explicit discriminants and the
+/// `Other(String)` variant legal together at all (E0732). Nothing in this crate
+/// ever cast a `DataType` to an integer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DataType {
-    #[serde(rename = "Email")]
     Email = 0,
-    #[serde(rename = "EmailDelivery")]
     EmailDelivery = 1,
-    #[serde(rename = "EmailSubmission")]
     EmailSubmission = 2,
-    #[serde(rename = "Mailbox")]
     Mailbox = 3,
-    #[serde(rename = "Thread")]
     Thread = 4,
-    #[serde(rename = "Identity")]
     Identity = 5,
-    #[serde(rename = "Core")]
     Core = 6,
-    #[serde(rename = "PushSubscription")]
     PushSubscription = 7,
-    #[serde(rename = "SearchSnippet")]
     SearchSnippet = 8,
-    #[serde(rename = "VacationResponse")]
     VacationResponse = 9,
-    #[serde(rename = "MDN")]
     Mdn = 10,
-    #[serde(rename = "Quota")]
     Quota = 11,
-    #[serde(rename = "SieveScript")]
     SieveScript = 12,
-    #[serde(rename = "Calendar")]
     Calendar = 13,
-    #[serde(rename = "CalendarEvent")]
     CalendarEvent = 14,
-    #[serde(rename = "CalendarEventNotification")]
     CalendarEventNotification = 15,
-    #[serde(rename = "AddressBook")]
     AddressBook = 16,
-    #[serde(rename = "ContactCard")]
     ContactCard = 17,
-    #[serde(rename = "FileNode")]
     FileNode = 18,
-    #[serde(rename = "Principal")]
     Principal = 19,
-    #[serde(rename = "ShareNotification")]
     ShareNotification = 20,
-    #[serde(rename = "ParticipantIdentity")]
     ParticipantIdentity = 21,
-    #[serde(rename = "CalendarAlert")]
     CalendarAlert = 22,
+    /// A data type name this crate does not model (RFC 8620 §7.2 permits any
+    /// extension's name). The name is kept exactly as it arrived on the wire.
+    Other(String),
+}
+
+impl DataType {
+    /// The JMAP data type name this value is, or carries, on the wire.
+    pub fn as_str(&self) -> &str {
+        match self {
+            DataType::Email => "Email",
+            DataType::EmailDelivery => "EmailDelivery",
+            DataType::EmailSubmission => "EmailSubmission",
+            DataType::Mailbox => "Mailbox",
+            DataType::Thread => "Thread",
+            DataType::Identity => "Identity",
+            DataType::Core => "Core",
+            DataType::PushSubscription => "PushSubscription",
+            DataType::SearchSnippet => "SearchSnippet",
+            DataType::VacationResponse => "VacationResponse",
+            DataType::Mdn => "MDN",
+            DataType::Quota => "Quota",
+            DataType::SieveScript => "SieveScript",
+            DataType::Calendar => "Calendar",
+            DataType::CalendarEvent => "CalendarEvent",
+            DataType::CalendarEventNotification => "CalendarEventNotification",
+            DataType::AddressBook => "AddressBook",
+            DataType::ContactCard => "ContactCard",
+            DataType::FileNode => "FileNode",
+            DataType::Principal => "Principal",
+            DataType::ShareNotification => "ShareNotification",
+            DataType::ParticipantIdentity => "ParticipantIdentity",
+            DataType::CalendarAlert => "CalendarAlert",
+            DataType::Other(name) => name,
+        }
+    }
+}
+
+impl Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// Written by hand rather than derived: a derived `Other(String)` would be
+// externally tagged (`{"Other":"Todo"}`), while RFC 8620 §7.2 puts a bare data
+// type name on the wire. `Result` here is the crate's own alias, so the serde
+// traits' results are spelled out.
+impl Serialize for DataType {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+struct DataTypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DataTypeVisitor {
+    type Value = DataType;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a JMAP data type name")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(match value {
+            "Email" => DataType::Email,
+            "EmailDelivery" => DataType::EmailDelivery,
+            "EmailSubmission" => DataType::EmailSubmission,
+            "Mailbox" => DataType::Mailbox,
+            "Thread" => DataType::Thread,
+            "Identity" => DataType::Identity,
+            "Core" => DataType::Core,
+            "PushSubscription" => DataType::PushSubscription,
+            "SearchSnippet" => DataType::SearchSnippet,
+            "VacationResponse" => DataType::VacationResponse,
+            "MDN" => DataType::Mdn,
+            "Quota" => DataType::Quota,
+            "SieveScript" => DataType::SieveScript,
+            "Calendar" => DataType::Calendar,
+            "CalendarEvent" => DataType::CalendarEvent,
+            "CalendarEventNotification" => DataType::CalendarEventNotification,
+            "AddressBook" => DataType::AddressBook,
+            "ContactCard" => DataType::ContactCard,
+            "FileNode" => DataType::FileNode,
+            "Principal" => DataType::Principal,
+            "ShareNotification" => DataType::ShareNotification,
+            "ParticipantIdentity" => DataType::ParticipantIdentity,
+            "CalendarAlert" => DataType::CalendarAlert,
+            name => DataType::Other(name.to_string()),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for DataType {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_str(DataTypeVisitor)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -502,32 +596,279 @@ impl Display for Error {
     }
 }
 
-impl Display for DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DataType::Mailbox => write!(f, "Mailbox"),
-            DataType::Thread => write!(f, "Thread"),
-            DataType::Email => write!(f, "Email"),
-            DataType::EmailDelivery => write!(f, "EmailDelivery"),
-            DataType::Identity => write!(f, "Identity"),
-            DataType::EmailSubmission => write!(f, "EmailSubmission"),
-            DataType::CalendarAlert => write!(f, "CalendarAlert"),
-            DataType::Core => write!(f, "Core"),
-            DataType::PushSubscription => write!(f, "PushSubscription"),
-            DataType::SearchSnippet => write!(f, "SearchSnippet"),
-            DataType::VacationResponse => write!(f, "VacationResponse"),
-            DataType::Mdn => write!(f, "MDN"),
-            DataType::Quota => write!(f, "Quota"),
-            DataType::SieveScript => write!(f, "SieveScript"),
-            DataType::Calendar => write!(f, "Calendar"),
-            DataType::CalendarEvent => write!(f, "CalendarEvent"),
-            DataType::CalendarEventNotification => write!(f, "CalendarEventNotification"),
-            DataType::AddressBook => write!(f, "AddressBook"),
-            DataType::ContactCard => write!(f, "ContactCard"),
-            DataType::FileNode => write!(f, "FileNode"),
-            DataType::Principal => write!(f, "Principal"),
-            DataType::ShareNotification => write!(f, "ShareNotification"),
-            DataType::ParticipantIdentity => write!(f, "ParticipantIdentity"),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::error::{JMAPError, MethodErrorType, ProblemDetails, ProblemType};
+
+    /// RFC 8620 §3.2 — every capability `URI` must render through
+    /// `AsRef<str>` as the exact URN the server advertises in its session
+    /// resource. Comparing against the serde rename keeps the two in sync.
+    #[test]
+    fn uri_as_ref_matches_the_serde_rename() {
+        let cases: &[(URI, &str)] = &[
+            (URI::Core, "urn:ietf:params:jmap:core"),
+            (URI::Mail, "urn:ietf:params:jmap:mail"),
+            (URI::Submission, "urn:ietf:params:jmap:submission"),
+            (
+                URI::VacationResponse,
+                "urn:ietf:params:jmap:vacationresponse",
+            ),
+            (URI::Contacts, "urn:ietf:params:jmap:contacts"),
+            (URI::Calendars, "urn:ietf:params:jmap:calendars"),
+            (URI::WebSocket, "urn:ietf:params:jmap:websocket"),
+            (URI::Sieve, "urn:ietf:params:jmap:sieve"),
+            (URI::Blob, "urn:ietf:params:jmap:blob"),
+            (URI::Quota, "urn:ietf:params:jmap:quota"),
+            (URI::Principals, "urn:ietf:params:jmap:principals"),
+            (
+                URI::PrincipalsOwner,
+                "urn:ietf:params:jmap:principals:owner",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 12, "all twelve capability URIs");
+        for (uri, urn) in cases {
+            assert_eq!(uri.as_ref(), *urn, "{uri:?} as_ref()");
+            assert_eq!(
+                serde_json::to_value(uri).unwrap(),
+                serde_json::to_value(urn).unwrap(),
+                "{uri:?} must serialise to the same URN it renders as"
+            );
         }
+    }
+
+    /// RFC 8620 §7.2 — every `DataType` must render, serialise and parse as the
+    /// exact data type name on the wire, so a state string printed by a client
+    /// matches the name the server sent.
+    #[test]
+    fn data_type_display_matches_the_serde_rename() {
+        let cases: &[(DataType, &str)] = &[
+            (DataType::Email, "Email"),
+            (DataType::EmailDelivery, "EmailDelivery"),
+            (DataType::EmailSubmission, "EmailSubmission"),
+            (DataType::Mailbox, "Mailbox"),
+            (DataType::Thread, "Thread"),
+            (DataType::Identity, "Identity"),
+            (DataType::Core, "Core"),
+            (DataType::PushSubscription, "PushSubscription"),
+            (DataType::SearchSnippet, "SearchSnippet"),
+            (DataType::VacationResponse, "VacationResponse"),
+            (DataType::Mdn, "MDN"),
+            (DataType::Quota, "Quota"),
+            (DataType::SieveScript, "SieveScript"),
+            (DataType::Calendar, "Calendar"),
+            (DataType::CalendarEvent, "CalendarEvent"),
+            (
+                DataType::CalendarEventNotification,
+                "CalendarEventNotification",
+            ),
+            (DataType::AddressBook, "AddressBook"),
+            (DataType::ContactCard, "ContactCard"),
+            (DataType::FileNode, "FileNode"),
+            (DataType::Principal, "Principal"),
+            (DataType::ShareNotification, "ShareNotification"),
+            (DataType::ParticipantIdentity, "ParticipantIdentity"),
+            (DataType::CalendarAlert, "CalendarAlert"),
+        ];
+
+        assert_eq!(cases.len(), 23, "all twenty-three modelled data types");
+        for (data_type, name) in cases {
+            assert_eq!(data_type.as_str(), *name, "{data_type:?} as_str");
+            assert_eq!(data_type.to_string(), *name, "{data_type:?} Display");
+            assert_eq!(
+                serde_json::to_value(data_type).unwrap(),
+                serde_json::to_value(name).unwrap(),
+                "{data_type:?} must serialise to the same name it renders as"
+            );
+            assert_eq!(
+                &serde_json::from_value::<DataType>(serde_json::to_value(name).unwrap()).unwrap(),
+                data_type,
+                "{name} must parse back to {data_type:?}, not to `Other`"
+            );
+        }
+    }
+
+    /// RFC 8620 §7.2 — `types` is a `String[]|null` of JMAP data type names and
+    /// a server may report a type the client has never heard of. Such a name
+    /// must survive as `DataType::Other`, both as an array entry and as a map
+    /// key in a `StateChange`'s `changed` object.
+    #[test]
+    fn an_unmodelled_data_type_is_kept_as_other() {
+        let unknown: DataType = serde_json::from_value(serde_json::json!("Todo")).unwrap();
+        assert_eq!(unknown, DataType::Other("Todo".to_string()));
+        assert_eq!(unknown.as_str(), "Todo");
+        assert_eq!(unknown.to_string(), "Todo");
+        assert_eq!(
+            serde_json::to_value(&unknown).unwrap(),
+            serde_json::json!("Todo"),
+            "Other must serialise as the bare name, not as an externally tagged object"
+        );
+
+        // The RFC 8620 §7.2.3 example subscription, whose first entry lists the
+        // application-defined "Todo" type.
+        let types: Vec<DataType> = serde_json::from_value(serde_json::json!(["Todo"])).unwrap();
+        assert_eq!(types, [DataType::Other("Todo".to_string())]);
+
+        // A `StateChange`'s `changed` map is keyed by data type name.
+        let changed: AHashMap<DataType, String> = serde_json::from_value(serde_json::json!({
+            "Todo": "1", "Mailbox": "2", "VendorExtension": "3"
+        }))
+        .unwrap();
+        assert_eq!(
+            changed
+                .get(&DataType::Other("Todo".to_string()))
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            changed.get(&DataType::Mailbox).map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            changed
+                .get(&DataType::Other("VendorExtension".to_string()))
+                .map(String::as_str),
+            Some("3")
+        );
+    }
+
+    #[test]
+    fn error_display_for_owned_string_variants() {
+        assert_eq!(
+            Error::Internal("Response type mismatch".to_string()).to_string(),
+            "Internal error: Response type mismatch"
+        );
+        assert_eq!(
+            Error::Server("connection reset".to_string()).to_string(),
+            "Server failed: connection reset"
+        );
+    }
+
+    /// RFC 8620 §3.6 — a method-level error is reported through
+    /// `Error::Method` with the "Request failed" prefix.
+    #[test]
+    fn error_display_for_method_error() {
+        let error = Error::Method(MethodError {
+            p_type: MethodErrorType::AccountReadOnly,
+        });
+        assert_eq!(error.to_string(), "Request failed: Account read only");
+    }
+
+    /// RFC 8620 §3.6.1.1 — a problem document is reported through
+    /// `Error::Problem` with the same "Request failed" prefix, and the
+    /// nested `ProblemDetails` rendering.
+    #[test]
+    fn error_display_for_problem_details() {
+        let error = Error::Problem(Box::new(ProblemDetails::new(
+            ProblemType::JMAP(JMAPError::Limit),
+            Some(413),
+            Some("Too large".to_string()),
+            Some("request exceeded 10MB".to_string()),
+            Some("10485760".to_string()),
+            Some("req-1".to_string()),
+        )));
+        assert_eq!(
+            error.to_string(),
+            "Request failed: Limit (status 413): Too large. \
+             Details: request exceeded 10MB"
+        );
+    }
+
+    #[test]
+    fn error_display_for_set_error() {
+        let set_error =
+            serde_json::from_str::<SetError<String>>(r#"{"type": "overQuota"}"#).unwrap();
+        assert_eq!(
+            Error::Set(set_error).to_string(),
+            "Set failed: overQuota",
+            "a SetError with no description renders only its type"
+        );
+    }
+
+    #[test]
+    fn error_display_for_parse_error() {
+        let parse_error = serde_json::from_str::<()>("nope").unwrap_err();
+        let rendered = parse_error.to_string();
+        assert_eq!(
+            Error::Parse(parse_error).to_string(),
+            format!("Parse error: {rendered}"),
+            "the serde message must be carried through verbatim"
+        );
+    }
+
+    #[test]
+    fn from_impls_wrap_their_source() {
+        let error: Error = "boom".into();
+        assert!(matches!(&error, Error::Internal(s) if s == "boom"));
+
+        let error: Error = MethodError {
+            p_type: MethodErrorType::AnchorNotFound,
+        }
+        .into();
+        assert!(matches!(
+            &error,
+            Error::Method(m) if *m.error() == MethodErrorType::AnchorNotFound
+        ));
+
+        let error: Error = ProblemDetails::new(
+            ProblemType::Other("urn:example:error".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .into();
+        assert!(matches!(&error, Error::Problem(p) if p.status().is_none()));
+
+        let set_error = serde_json::from_str::<SetError<String>>(
+            r#"{"type": "notFound", "description": "No such mailbox"}"#,
+        )
+        .unwrap();
+        let error: Error = set_error.into();
+        assert_eq!(error.to_string(), "Set failed: notFound: No such mailbox");
+
+        let parse_error = serde_json::from_str::<()>("][").unwrap_err();
+        let error: Error = parse_error.into();
+        assert!(matches!(&error, Error::Parse(_)));
+    }
+
+    /// The `websockets` feature adds a `WebSocket` error arm; its
+    /// conversion and rendering are only compiled when the feature is on.
+    #[cfg(feature = "websockets")]
+    #[test]
+    fn from_tungstenite_error_wraps_as_websocket_error() {
+        use tokio_tungstenite::tungstenite::error::{Error as WsError, ProtocolError};
+
+        let error: Error = WsError::Protocol(ProtocolError::InvalidOpcode(9)).into();
+        assert_eq!(
+            error.to_string(),
+            "WebSockets error: WebSocket protocol error: Encountered invalid opcode: 9"
+        );
+    }
+
+    /// `Error::Transport` wraps a `reqwest::Error`, which reqwest only
+    /// ever builds itself (`Error::new` is `pub(crate)`). A unit test can
+    /// still obtain one from the request builder without touching a
+    /// socket, which is what this covers.
+    #[cfg(feature = "websockets")]
+    #[test]
+    fn from_reqwest_error_wraps_as_transport_error() {
+        // reqwest is configured with `rustls-no-provider`, so a
+        // process-wide crypto provider has to exist before a Client can
+        // be constructed. Installing it is idempotent.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let reqwest_error = reqwest::Client::new()
+            .get("://not-a-valid-url")
+            .build()
+            .expect_err("an invalid URL must fail to build a request");
+        let error: Error = reqwest_error.into();
+        assert!(matches!(&error, Error::Transport(_)));
+        assert!(
+            error.to_string().starts_with("Transport error: "),
+            "got {error}"
+        );
     }
 }

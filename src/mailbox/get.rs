@@ -136,3 +136,62 @@ impl GetObject for Mailbox<Set> {
 impl GetObject for Mailbox<Get> {
     type GetArguments = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `Mailbox<Get>` sharing accessors against
+    //! RFC 8621 §5.1 (`shareWith`) and the RFC 4371 §3.4 right names.
+    //! No server, no socket, no async.
+
+    use super::*;
+    use serde_json::json;
+
+    fn mailbox(value: serde_json::Value) -> Mailbox<Get> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// RFC 8621 §5.1 — `shareWith` is a map of principal id to a map of
+    /// RFC 4371 §3.4 right names to booleans, and both accessors read the
+    /// same field: `acl()` borrows it, `take_acl()` moves it out.
+    #[test]
+    fn take_acl_moves_the_share_with_map_out() {
+        let mut mailbox = mailbox(json!({
+            "id": "mf2",
+            "name": "Shared",
+            "shareWith": {
+                "P2342fnddd20": { "mayReadItems": true, "mayAddItems": false }
+            }
+        }));
+
+        {
+            let acl = mailbox.acl().expect("shareWith must be present");
+            assert_eq!(acl.len(), 1);
+            let rights = &acl["P2342fnddd20"];
+            assert!(rights[&ACL::ReadItems], "mayReadItems was sent true");
+            assert!(
+                !rights[&ACL::AddItems],
+                "mayAddItems was sent false and must stay false"
+            );
+        }
+
+        assert_eq!(
+            mailbox.take_acl().expect("the map must move out").len(),
+            1,
+            "the moved map must keep every principal"
+        );
+        assert!(
+            mailbox.acl().is_none(),
+            "taking the acl must leave the record unshared"
+        );
+    }
+
+    /// RFC 8621 §5.1 — `shareWith` is optional, so a mailbox nobody has
+    /// been granted rights on reads as `None` and takes as `None`.
+    #[test]
+    fn take_acl_on_an_unshared_mailbox_is_none() {
+        let mut mailbox = mailbox(json!({ "id": "mf1", "name": "Inbox" }));
+
+        assert!(mailbox.acl().is_none());
+        assert!(mailbox.take_acl().is_none());
+    }
+}

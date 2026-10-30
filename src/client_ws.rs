@@ -155,7 +155,16 @@ enum WebSocketMessage_ {
 #[derive(Debug)]
 pub enum WebSocketMessage {
     Response(Response<TaggedMethodResponse>),
-    PushNotification(PushObject),
+    /// A push notification, with the RFC 8887 §5.2 `pushState` kept alongside
+    /// the [`PushObject`].
+    ///
+    /// RFC 8887 §5.2 defines the WebSocketPush object as a PushNotification
+    /// plus `pushState: String|null`, the id of the last event. That token is
+    /// what a client passes back to `Client::enable_push_ws` after reconnecting
+    /// so the server replays what it missed (RFC 8620 §7.1 `Last-Event-ID`);
+    /// without it, live push cannot be resumed. Read the notification itself
+    /// through `.push` and the resume token through `.push_state`.
+    PushNotification(WebSocketPushObject),
 }
 
 pub struct WsStream {
@@ -283,7 +292,10 @@ impl Client {
                                     )))
                                 }
                                 WebSocketMessage_::PushNotification(push) => {
-                                    yield Ok(WebSocketMessage::PushNotification(push.push))
+                                    // RFC 8887 §5.2: carry `pushState` through with the
+                                    // notification; it is the token a client needs to
+                                    // resume push after a reconnect.
+                                    yield Ok(WebSocketMessage::PushNotification(push))
                                 }
                                 WebSocketMessage_::Error(err) => yield Err(ProblemDetails::from(err).into()),
                             },
@@ -391,6 +403,9 @@ impl From<WebSocketError> for ProblemDetails {
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for WebSocket session-state handling and the `DummyVerifier`
+    //! used when the caller enables `accept_invalid_certs` (RFC 8887 §4.2).
+
     use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
@@ -553,5 +568,104 @@ mod tests {
             WebSocketMessage::Response(response) => response.session_state(),
             WebSocketMessage::PushNotification(_) => panic!("expected a response, got a push"),
         }
+    }
+    use super::{DummyVerifier, ServerCertVerifier, SignatureScheme};
+    use rustls::internal::msgs::codec::{Codec, Reader};
+    use rustls::DigitallySignedStruct;
+    use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+
+    /// An empty end-entity certificate, no intermediates, no OCSP
+    /// response and the epoch: the verifier looks at none of it and
+    /// returns the `ServerCertVerified::assertion()` marker.
+    #[test]
+    fn dummy_verifier_accepts_any_server_certificate() {
+        let verified = DummyVerifier
+            .verify_server_cert(
+                &CertificateDer::from(&b""[..]),
+                &[],
+                &ServerName::try_from("example.org").unwrap(),
+                &[],
+                UnixTime::since_unix_epoch(std::time::Duration::from_secs(1_767_225_600)),
+            )
+            .expect("the dummy verifier never rejects a chain");
+
+        assert_eq!(format!("{verified:?}"), "ServerCertVerified(())");
+    }
+
+    /// `DigitallySignedStruct` has no public constructor, so build one
+    /// from its wire form: the scheme as two bytes, then a
+    /// `u16`-length signature.
+    fn signed_struct(scheme: SignatureScheme) -> DigitallySignedStruct {
+        let mut bytes = scheme.to_array().to_vec();
+        bytes.extend_from_slice(&[0x00, 0x04, 0xde, 0xad, 0xbe, 0xef]);
+
+        let mut reader = Reader::init(&bytes);
+        let dss = DigitallySignedStruct::read(&mut reader).expect("the fixture must parse");
+        assert_eq!(dss.scheme, scheme, "the scheme survives the round trip");
+        assert_eq!(dss.signature(), &[0xde, 0xad, 0xbe, 0xef]);
+        dss
+    }
+
+    /// Both signature hooks ignore the message, the certificate and the
+    /// scheme they are handed, and return
+    /// `HandshakeSignatureValid::assertion()`.
+    #[test]
+    fn dummy_verifier_accepts_tls12_and_tls13_signatures() {
+        let cert = CertificateDer::from(&b""[..]);
+
+        for scheme in [
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ED25519,
+        ] {
+            let dss = signed_struct(scheme);
+
+            let tls12 = DummyVerifier
+                .verify_tls12_signature(b"handshake message", &cert, &dss)
+                .expect("the dummy verifier never rejects a TLS 1.2 signature");
+            assert_eq!(
+                format!("{tls12:?}"),
+                "HandshakeSignatureValid(())",
+                "{scheme:?} over TLS 1.2"
+            );
+
+            let tls13 = DummyVerifier
+                .verify_tls13_signature(b"handshake message", &cert, &dss)
+                .expect("the dummy verifier never rejects a TLS 1.3 signature");
+            assert_eq!(
+                format!("{tls13:?}"),
+                "HandshakeSignatureValid(())",
+                "{scheme:?} over TLS 1.3"
+            );
+        }
+    }
+
+    /// The verifier advertises the full thirteen-entry scheme list, in the
+    /// order the source writes it: every PKCS#1, ECDSA, RSA-PSS, Ed25519
+    /// and Ed448 scheme. A server that picks any of them meets a verifier
+    /// that has already claimed to support it.
+    #[test]
+    fn dummy_verifier_advertises_all_thirteen_schemes() {
+        let schemes = DummyVerifier.supported_verify_schemes();
+
+        assert_eq!(
+            schemes,
+            vec![
+                SignatureScheme::RSA_PKCS1_SHA1,
+                SignatureScheme::ECDSA_SHA1_Legacy,
+                SignatureScheme::RSA_PKCS1_SHA256,
+                SignatureScheme::ECDSA_NISTP256_SHA256,
+                SignatureScheme::RSA_PKCS1_SHA384,
+                SignatureScheme::ECDSA_NISTP384_SHA384,
+                SignatureScheme::RSA_PKCS1_SHA512,
+                SignatureScheme::ECDSA_NISTP521_SHA512,
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+                SignatureScheme::ED25519,
+                SignatureScheme::ED448,
+            ]
+        );
+        assert_eq!(schemes.len(), 13, "thirteen schemes, no more");
     }
 }

@@ -81,3 +81,36 @@ impl SetObject for VacationResponse<Get> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `<Get>` arm of `SetObject` on
+    //! `VacationResponse` (RFC 8621 §3.5). A fetched singleton is not a
+    //! patch, and the trait arm encodes that.
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §3.5 — a fetched vacation response has no creation id.
+    /// The object is a singleton the client updates in place, so it must
+    /// never be reported as something `create` is producing.
+    #[test]
+    fn a_fetched_vacation_response_has_no_creation_id() {
+        let response: VacationResponse<Get> = serde_json::from_value(json!({
+            "id": "singleton",
+            "isEnabled": true
+        }))
+        .unwrap();
+
+        assert_eq!(response.create_id(), None);
+    }
+
+    /// RFC 8621 §3.5 — asking a `<Get>` flavour to construct itself is a
+    /// type-level mistake, and the arm refuses loudly rather than handing
+    /// back an empty patch.
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn a_fetched_vacation_response_refuses_to_construct_itself() {
+        let _ = <VacationResponse<Get> as SetObject>::new(Some(0));
+    }
+}

@@ -114,3 +114,51 @@ impl GetObject for EmailSubmission<Set> {
 impl GetObject for EmailSubmission<Get> {
     type GetArguments = ();
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `EmailSubmission<Get>` id accessors against
+    //! RFC 8621 §4.4 (Email Submission objects). No server, no socket,
+    //! no async.
+
+    use super::*;
+    use serde_json::json;
+
+    fn submission(value: serde_json::Value) -> EmailSubmission<Get> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    /// RFC 8621 §4.4 — `id` borrows the submission id and `take_id`
+    /// moves it out, leaving the record without one.
+    #[test]
+    fn take_id_moves_the_id_out() {
+        let mut submission = submission(json!({
+            "id": "S1",
+            "identityId": "I1",
+            "emailId": "M1"
+        }));
+
+        assert_eq!(submission.id(), Some("S1"));
+        assert_eq!(submission.take_id(), "S1");
+        assert_eq!(
+            submission.id(),
+            None,
+            "taking the id must leave the record without one"
+        );
+        assert_eq!(
+            submission.identity_id(),
+            Some("I1"),
+            "taking the id must not disturb the other members"
+        );
+    }
+
+    /// RFC 8621 §4.4 — a record that never had an id yields the empty
+    /// string rather than panicking: the accessor is total.
+    #[test]
+    fn take_id_on_a_record_without_one_is_empty() {
+        let mut submission = submission(json!({ "undoStatus": "final" }));
+
+        assert_eq!(submission.id(), None);
+        assert_eq!(submission.take_id(), "");
+    }
+}

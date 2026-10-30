@@ -91,3 +91,37 @@ impl Keys {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `<Get>` arm of `SetObject` on
+    //! `PushSubscription` (RFC 8620 §7.3). A fetched subscription is
+    //! not a patch, and the trait arm encodes that.
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8620 §7.3 — a fetched subscription has no creation id, so the
+    /// generic `SetRequest` machinery cannot accidentally treat it as a
+    /// new subscription.
+    #[test]
+    fn a_fetched_subscription_has_no_creation_id() {
+        let subscription: PushSubscription<Get> = serde_json::from_value(json!({
+            "id": "P1",
+            "deviceClientId": "a031-9af8-bec4-3d4f",
+            "url": "https://push.example.com/context/1234"
+        }))
+        .unwrap();
+
+        assert_eq!(subscription.create_id(), None);
+    }
+
+    /// RFC 8620 §7.3 — asking a `<Get>` flavour to construct itself is a
+    /// type-level mistake, and the arm refuses loudly rather than handing
+    /// back an empty patch.
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn a_fetched_subscription_refuses_to_construct_itself() {
+        let _ = <PushSubscription<Get> as SetObject>::new(Some(0));
+    }
+}

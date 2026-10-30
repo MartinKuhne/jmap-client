@@ -361,3 +361,239 @@ impl QueryObject for Email<Set> {
 
     type Sort = Comparator;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §4.4.1 — every `FilterCondition` property is a
+    /// single-member object keyed by the RFC's camelCase name. The
+    /// non-standard Stalwart extensions are included so a rename cannot
+    /// slip through unnoticed.
+    #[test]
+    fn every_filter_condition_serialises_with_its_own_key() {
+        let cases: Vec<(Filter, serde_json::Value)> = vec![
+            (
+                Filter::in_mailbox("MB23cfa8094c0f41e6"),
+                json!({ "inMailbox": "MB23cfa8094c0f41e6" }),
+            ),
+            (
+                Filter::in_mailbox_other_than(["MB23cfa8094c0f41e6", "MB674cc24095db49ce"]),
+                json!({ "inMailboxOtherThan": ["MB23cfa8094c0f41e6", "MB674cc24095db49ce"] }),
+            ),
+            (
+                Filter::before(1_720_000_000),
+                json!({ "before": "2024-07-03T09:46:40Z" }),
+            ),
+            (
+                Filter::after(1_704_067_200),
+                json!({ "after": "2024-01-01T00:00:00Z" }),
+            ),
+            (Filter::min_size(1024), json!({ "minSize": 1024 })),
+            (Filter::max_size(4_194_304), json!({ "maxSize": 4_194_304 })),
+            (
+                Filter::all_in_thread_have_keyword("$seen"),
+                json!({ "allInThreadHaveKeyword": "$seen" }),
+            ),
+            (
+                Filter::some_in_thread_have_keyword("$flagged"),
+                json!({ "someInThreadHaveKeyword": "$flagged" }),
+            ),
+            (
+                Filter::none_in_thread_have_keyword("$junk"),
+                json!({ "noneInThreadHaveKeyword": "$junk" }),
+            ),
+            (
+                Filter::has_keyword("$draft"),
+                json!({ "hasKeyword": "$draft" }),
+            ),
+            (
+                Filter::not_keyword("$junk"),
+                json!({ "notKeyword": "$junk" }),
+            ),
+            (
+                Filter::has_attachment(true),
+                json!({ "hasAttachment": true }),
+            ),
+            (
+                Filter::has_attachment(false),
+                json!({ "hasAttachment": false }),
+            ),
+            (
+                Filter::text("quarterly report"),
+                json!({ "text": "quarterly report" }),
+            ),
+            (
+                Filter::from("joe@example.com"),
+                json!({ "from": "joe@example.com" }),
+            ),
+            (
+                Filter::to("alice@example.com"),
+                json!({ "to": "alice@example.com" }),
+            ),
+            (
+                Filter::cc("bob@example.com"),
+                json!({ "cc": "bob@example.com" }),
+            ),
+            (
+                Filter::bcc("carol@example.com"),
+                json!({ "bcc": "carol@example.com" }),
+            ),
+            (
+                Filter::subject("Team lunch"),
+                json!({ "subject": "Team lunch" }),
+            ),
+            (
+                Filter::body("please review"),
+                json!({ "body": "please review" }),
+            ),
+            // Non-standard, Stalwart-specific extensions
+            (
+                Filter::id(["M7f6ed5bcfd7e2604d1753f6c"]),
+                json!({ "id": ["M7f6ed5bcfd7e2604d1753f6c"] }),
+            ),
+            (
+                Filter::sent_before(1_720_000_000),
+                json!({ "sentBefore": "2024-07-03T09:46:40Z" }),
+            ),
+            (
+                Filter::sent_after(1_704_067_200),
+                json!({ "sentAfter": "2024-01-01T00:00:00Z" }),
+            ),
+            (
+                Filter::in_thread("Tf14a5b2c9d3e0a7b6c5d4e3f2"),
+                json!({ "inThread": "Tf14a5b2c9d3e0a7b6c5d4e3f2" }),
+            ),
+        ];
+
+        // 20 RFC conditions + 4 Stalwart extensions
+        assert_eq!(cases.len(), 24);
+        for (filter, expected) in cases {
+            let serialised = serde_json::to_value(&filter).unwrap();
+            assert_eq!(
+                serialised, expected,
+                "{filter:?} must serialise as {expected}"
+            );
+            assert_eq!(
+                serialised.as_object().unwrap().len(),
+                1,
+                "a FilterCondition carries exactly one property"
+            );
+        }
+    }
+
+    /// RFC 8621 §4.4.1 — `header` is a two-element array when a value is
+    /// given and a one-element array when only the header name is tested.
+    #[test]
+    fn header_filter_arity_tracks_the_optional_value() {
+        assert_eq!(
+            serde_json::to_value(Filter::header("In-Reply-To", Some("<abc@example.com>"))).unwrap(),
+            json!({ "header": ["In-Reply-To", "<abc@example.com>"] })
+        );
+        assert_eq!(
+            serde_json::to_value(Filter::header("X-Spam-Result", None::<&str>)).unwrap(),
+            json!({ "header": ["X-Spam-Result"] })
+        );
+    }
+
+    /// RFC 8621 §4.4.2 — the Comparator `property` values the spec names,
+    /// each wrapped in the generic comparator envelope that defaults
+    /// `isAscending` to true and omits `collation`.
+    #[test]
+    fn comparator_property_names_match_the_rfc() {
+        let cases: Vec<(query::Comparator<Comparator>, serde_json::Value)> = vec![
+            (
+                Comparator::received_at(),
+                json!({ "isAscending": true, "property": "receivedAt" }),
+            ),
+            (
+                Comparator::size(),
+                json!({ "isAscending": true, "property": "size" }),
+            ),
+            (
+                Comparator::from(),
+                json!({ "isAscending": true, "property": "from" }),
+            ),
+            (
+                Comparator::to(),
+                json!({ "isAscending": true, "property": "to" }),
+            ),
+            (
+                Comparator::subject(),
+                json!({ "isAscending": true, "property": "subject" }),
+            ),
+            (
+                Comparator::sent_at(),
+                json!({ "isAscending": true, "property": "sentAt" }),
+            ),
+            (
+                Comparator::cc(),
+                json!({ "isAscending": true, "property": "cc" }),
+            ),
+        ];
+
+        for (comparator, expected) in cases {
+            assert_eq!(serde_json::to_value(&comparator).unwrap(), expected);
+        }
+    }
+
+    /// RFC 8621 §4.4.2 — the three keyword comparators MUST also carry a
+    /// `keyword` member on the Comparator object.
+    #[test]
+    fn keyword_comparators_carry_their_keyword() {
+        assert_eq!(
+            serde_json::to_value(Comparator::has_keyword("$flagged")).unwrap(),
+            json!({ "isAscending": true, "property": "hasKeyword", "keyword": "$flagged" })
+        );
+        assert_eq!(
+            serde_json::to_value(Comparator::all_in_thread_have_keyword("$seen")).unwrap(),
+            json!({
+                "isAscending": true,
+                "property": "allInThreadHaveKeyword",
+                "keyword": "$seen"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Comparator::some_in_thread_have_keyword("$answered")).unwrap(),
+            json!({
+                "isAscending": true,
+                "property": "someInThreadHaveKeyword",
+                "keyword": "$answered"
+            })
+        );
+    }
+
+    /// RFC 8621 §4.4.2 example sort — `isAscending` is flipped and the
+    /// optional `collation` member (RFC 8620 §5.5.1) is emitted only when
+    /// it has been set.
+    #[test]
+    fn comparator_ordering_and_collation_are_configurable() {
+        assert_eq!(
+            serde_json::to_value(Comparator::some_in_thread_have_keyword("$flagged").descending())
+                .unwrap(),
+            json!({
+                "isAscending": false,
+                "property": "someInThreadHaveKeyword",
+                "keyword": "$flagged"
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Comparator::subject().descending().ascending()).unwrap(),
+            json!({ "isAscending": true, "property": "subject" })
+        );
+        assert_eq!(
+            serde_json::to_value(Comparator::from().is_ascending(false)).unwrap(),
+            json!({ "isAscending": false, "property": "from" })
+        );
+        assert_eq!(
+            serde_json::to_value(Comparator::subject().collation("i;unicode-casemap".to_string()))
+                .unwrap(),
+            json!({
+                "isAscending": true,
+                "collation": "i;unicode-casemap",
+                "property": "subject"
+            })
+        );
+    }
+}

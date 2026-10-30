@@ -87,3 +87,38 @@ impl SetObject for Identity<Get> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the `<Get>` arm of `SetObject` on `Identity`
+    //! (RFC 8621 §2). A fetched record is not a patch, and the trait
+    //! arm encodes that: it can never mint a creation id, and it refuses
+    //! to construct itself.
+
+    use super::*;
+    use serde_json::json;
+
+    /// RFC 8621 §2 — a fetched identity has no creation id. The generic
+    /// `SetRequest` machinery uses this to decide that the object cannot
+    /// take part in `create`, and the answer must be `None` rather than a
+    /// bare counter that would serialise as a bogus `c0` key.
+    #[test]
+    fn a_fetched_identity_has_no_creation_id() {
+        let identity: Identity<Get> = serde_json::from_value(json!({
+            "id": "I1",
+            "name": "Philip Jagger"
+        }))
+        .unwrap();
+
+        assert_eq!(identity.create_id(), None);
+    }
+
+    /// RFC 8621 §2 — asking a `<Get>` flavour to construct itself is a
+    /// type-level mistake, and the arm says so loudly rather than handing
+    /// back an empty patch that would silently serialise to `{}`.
+    #[test]
+    #[should_panic(expected = "not implemented")]
+    fn a_fetched_identity_refuses_to_construct_itself() {
+        let _ = <Identity<Get> as SetObject>::new(Some(0));
+    }
+}
