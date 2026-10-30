@@ -192,7 +192,7 @@ async fn connect_reads_the_session_resource() {
         .mail_capabilities()
         .expect("mail must parse as Capabilities::Mail");
     assert_eq!(mail.max_mailboxes_per_email(), None);
-    assert_eq!(mail.max_mailbox_depth(), 10);
+    assert_eq!(mail.max_mailbox_depth(), Some(10));
     assert_eq!(mail.max_size_mailbox_name(), 100);
     assert!(mail.may_create_top_level_mailbox());
 
@@ -200,9 +200,14 @@ async fn connect_reads_the_session_resource() {
         .submission_capabilities()
         .expect("submission must parse as Capabilities::Submission");
     assert_eq!(
-        submission.submission_extensions(),
-        ["SIZE", "DSN", "UTF8ONLY"]
+        submission
+            .submission_extensions()
+            .get("SIZE")
+            .map(Vec::as_slice),
+        Some(&["1229782938".to_string()][..]),
+        "RFC 8621 1.3.2 submissionExtensions is a map of ehlo-name to ehlo-args"
     );
+    assert_eq!(submission.submission_extensions().len(), 3);
 
     let ws = session
         .websocket_capabilities()
@@ -252,14 +257,27 @@ async fn an_rfc_shaped_session_leaves_the_session_level_limit_accessors_empty() 
     assert!(session.has_capability("urn:ietf:params:jmap:submission"));
 
     // ...but an empty session-level object is filed under
-    // `Capabilities::Empty`, so the typed limit accessors find nothing. A
-    // caller that reads limits from the session rather than from the account
-    // gets None against a spec-conformant server.
+    // `Capabilities::Empty`, so the session-level typed limit accessors find
+    // nothing. A caller that reads limits from the session rather than from the
+    // account gets None against a spec-conformant server.
     assert!(session.mail_capabilities().is_none());
     assert!(session.submission_capabilities().is_none());
 
-    // The account record carrying the real limits is still reachable.
-    assert!(session.account(ACCOUNT_ID).is_some());
+    // The limits are reachable where RFC 8621 §1.3.1/§1.3.2 actually put them:
+    // on the account's `accountCapabilities`.
+    let account = session.account(ACCOUNT_ID).expect("the fixture account");
+    let mail = account
+        .mail_capabilities()
+        .expect("the account carries the RFC 8621 1.3.1 mail limits");
+    assert_eq!(mail.max_mailbox_depth(), Some(10));
+    assert_eq!(mail.max_size_mailbox_name(), 100);
+    assert_eq!(mail.max_size_attachments_per_email(), Some(50_000_000));
+
+    let submission = account
+        .submission_capabilities()
+        .expect("the account carries the RFC 8621 1.3.2 submission limits");
+    assert_eq!(submission.max_delayed_send(), 4_294_967_295);
+    assert_eq!(submission.submission_extensions().len(), 3);
 }
 
 #[tokio::test]

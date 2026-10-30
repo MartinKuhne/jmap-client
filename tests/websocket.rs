@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use jmap_client::client::Client;
-use jmap_client::client_ws::WebSocketMessage;
+use jmap_client::client_ws::{WebSocketMessage, WebSocketPushObject};
 use jmap_client::core::error::{JMAPError, ProblemType};
 use jmap_client::core::request::Request;
 use jmap_client::{DataType, Error, Method, PushObject, URI};
@@ -148,10 +148,18 @@ async fn wait_for_subscribers(server: &MockJmapServer, want: usize) {
     );
 }
 
+/// Pulls the RFC 8887 §5.2 WebSocketPush object out of a notification.
+fn push_notification(message: WebSocketMessage) -> WebSocketPushObject {
+    match message {
+        WebSocketMessage::PushNotification(notification) => notification,
+        other => panic!("expected a push notification, got {other:?}"),
+    }
+}
+
 /// Pulls the `changed` map out of a `StateChange` notification.
 fn state_change(message: WebSocketMessage) -> ahash::AHashMap<String, ahash::AHashMap<DataType, String>> {
-    match message {
-        WebSocketMessage::PushNotification(PushObject::StateChange { changed }) => changed,
+    match push_notification(message).push {
+        PushObject::StateChange { changed } => changed,
         other => panic!("expected a StateChange push, got {other:?}"),
     }
 }
@@ -410,15 +418,19 @@ async fn email_push_of_a_fixture_email_arrives_as_a_notification() {
 
     let message = recv(&mut stream).await;
     match message {
-        WebSocketMessage::PushNotification(PushObject::EmailPush {
-            account_id,
-            email,
+        WebSocketMessage::PushNotification(WebSocketPushObject {
+            push: PushObject::EmailPush { account_id, email },
+            push_state,
         }) => {
             assert_eq!(account_id, ACCOUNT);
             assert_eq!(email["id"], "em_1");
             assert!(
                 email["mailboxIds"].is_object(),
                 "the push carries the RFC 8621 4.1.1 metadata a client needs"
+            );
+            assert!(
+                push_state.is_some(),
+                "RFC 8887 5.2: every WebSocketPush object carries a pushState"
             );
         }
         other => panic!("expected an EmailPush notification, got {other:?}"),
@@ -449,14 +461,87 @@ async fn push_email_with_an_explicit_payload_arrives_verbatim() {
 
     let message = recv(&mut stream).await;
     match message {
-        WebSocketMessage::PushNotification(PushObject::EmailPush { account_id, email }) => {
+        WebSocketMessage::PushNotification(WebSocketPushObject {
+            push: PushObject::EmailPush { account_id, email },
+            push_state,
+        }) => {
             assert_eq!(account_id, ACCOUNT);
             assert_eq!(email["id"], "em_fresh");
             assert_eq!(email["blobId"], "blob_fresh");
             assert_eq!(email["size"], 512);
+            assert!(
+                push_state.is_some(),
+                "RFC 8887 5.2: the pushState travels with the notification"
+            );
         }
         other => panic!("expected an EmailPush notification, got {other:?}"),
     }
+}
+
+/// RFC 8887 §5.2 — the WebSocketPush object is a PushNotification **plus**
+/// `pushState: String|null`, the id of the last event. That token exists so a
+/// client can resume push after reconnecting (RFC 8620 §7.1 `Last-Event-ID`).
+/// This drives the mock's WebSocket leg end to end: read the state off a live
+/// push, reconnect with it, and get the event that was missed while the socket
+/// was down.
+#[tokio::test]
+async fn a_push_notification_surfaces_its_push_state_and_resumes_after_a_reconnect() {
+    let server = MockJmapServer::start();
+    let client = connected_client(&server).await;
+
+    // First connection: two changes, and the client records the state of the
+    // first one — as if the socket died right after it.
+    let mut stream = client.connect_ws().await.expect("connect_ws");
+    wait_for_subscribers(&server, 1).await;
+    client
+        .enable_push_ws(None::<Vec<DataType>>, None::<String>)
+        .await
+        .expect("enable_push_ws");
+    sync(&client, &mut stream).await;
+
+    server.handle().trigger_state_change("Mailbox", "1");
+    let first = push_notification(recv(&mut stream).await);
+    assert!(
+        matches!(first.push, PushObject::StateChange { .. }),
+        "the notification itself is still reachable through `.push`: {:?}",
+        first.push
+    );
+    let resume_state = first
+        .push_state
+        .expect("RFC 8887 §5.2 puts pushState on every WebSocketPush object");
+    assert!(
+        !resume_state.is_empty(),
+        "the resume token is a non-empty last-event id"
+    );
+
+    // A second change arrives after that token was taken, so resuming from it
+    // must replay exactly this one.
+    server.handle().trigger_state_change("Mailbox", "2");
+    let second = push_notification(recv(&mut stream).await);
+    assert_ne!(
+        second.push_state.as_deref(),
+        Some(resume_state.as_str()),
+        "each push carries its own, later, pushState"
+    );
+    drop(stream);
+
+    // Reconnect and resume from the token read off the live push.
+    let mut stream = client.connect_ws().await.expect("reconnect_ws");
+    wait_for_subscribers(&server, 1).await;
+    client
+        .enable_push_ws(None::<Vec<DataType>>, Some(resume_state.as_str()))
+        .await
+        .expect("enable_push_ws with a pushState to replay from");
+
+    let replayed = state_change(recv(&mut stream).await);
+    assert_eq!(
+        replayed
+            .get(ACCOUNT)
+            .and_then(|types| types.get(&DataType::Mailbox))
+            .map(String::as_str),
+        Some("2"),
+        "resuming from the pushState read off the live push replays the missed event"
+    );
 }
 
 // ---------------------------------------------------------------------------

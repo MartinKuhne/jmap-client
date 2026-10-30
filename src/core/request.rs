@@ -666,7 +666,7 @@ mod tests {
             }),
             "urn:ietf:params:jmap:submission" => json!({
                 "maxDelayedSend": 0,
-                "submissionExtensions": []
+                "submissionExtensions": {}
             }),
             "urn:ietf:params:jmap:websocket" => json!({
                 "url": "wss://example.com/jmap/ws",

@@ -70,7 +70,11 @@ pub fn session_json(base_url: &str, ws_url: &str) -> Value {
             },
             "urn:ietf:params:jmap:submission": {
                 "maxDelayedSend": 4_102_444_800u64,
-                "submissionExtensions": ["SIZE", "DSN", "UTF8ONLY"]
+                "submissionExtensions": {
+                    "SIZE": ["1229782938"],
+                    "DSN": [],
+                    "UTF8ONLY": []
+                }
             },
             "urn:ietf:params:jmap:vacationresponse": {},
             "urn:ietf:params:jmap:websocket": {
@@ -132,7 +136,11 @@ pub fn session_json(base_url: &str, ws_url: &str) -> Value {
                     },
                     "urn:ietf:params:jmap:submission": {
                         "maxDelayedSend": 4_102_444_800u64,
-                        "submissionExtensions": ["SIZE", "DSN", "UTF8ONLY"]
+                        "submissionExtensions": {
+                            "SIZE": ["1229782938"],
+                            "DSN": [],
+                            "UTF8ONLY": []
+                        }
                     },
                     "urn:ietf:params:jmap:vacationresponse": {},
                     "urn:ietf:params:jmap:sieve": {

@@ -156,11 +156,12 @@ fn session_advertises_every_capability_block() {
         .unwrap()
         .contains(&json!("i;unicode-casemap")));
 
-    // Submission extensions are an *array of strings*, which is what
-    // `jmap_client` deserialises into `Vec<String>`.
+    // Submission extensions are RFC 8621 §1.3.2's `String[String[]]`: an
+    // object keyed by the SMTP extension's ehlo-name whose value is that
+    // extension's ehlo-args.
     assert_eq!(
         caps["urn:ietf:params:jmap:submission"]["submissionExtensions"],
-        json!(["SIZE", "DSN", "UTF8ONLY"])
+        json!({ "SIZE": ["1229782938"], "DSN": [], "UTF8ONLY": [] })
     );
 
     // WebSocket points at the mock's own endpoint.
@@ -199,6 +200,23 @@ fn session_advertises_every_capability_block() {
         json!(ACCOUNT_ID),
         "the fixture account is the primary mail account"
     );
+    // The limits RFC 8621 §1.3.1/§1.3.2 put on the *account*, in the same
+    // shapes the client models: `maxMailboxDepth` may be null ("no limit") and
+    // `submissionExtensions` is a `String[String[]]` map.
+    let account_caps = session["accounts"][ACCOUNT_ID]["accountCapabilities"]
+        .as_object()
+        .expect("the fixture account advertises its capabilities");
+    assert!(account_caps.contains_key(MAIL));
+    assert_eq!(
+        account_caps[MAIL]["maxMailboxDepth"],
+        json!(10),
+        "maxMailboxDepth is UnsignedInt|null (RFC 8621 1.3.1); the mock sends a number"
+    );
+    assert_eq!(
+        account_caps["urn:ietf:params:jmap:submission"]["submissionExtensions"],
+        json!({ "SIZE": ["1229782938"], "DSN": [], "UTF8ONLY": [] })
+    );
+
     assert_eq!(session["state"], json!("1"));
 }
 

@@ -718,34 +718,70 @@ impl<'de> Deserialize<'de> for BodyProperty {
     }
 }
 
+/// The `urn:ietf:params:jmap:mail` capability block (RFC 8621 §1.3.1).
+///
+/// RFC 8621 §1.3.1 says the value of this capability in the *session*
+/// `capabilities` property is an **empty object**, and that the limits below
+/// live in an account's `accountCapabilities`. Read them through
+/// [`crate::core::session::Account::mail_capabilities`];
+/// [`crate::core::session::Session::mail_capabilities`] only finds something
+/// when a server deviates from §1.3.1 and repeats the block at session level.
+///
+/// Every property RFC 8621 §1.3.1 types as `UnsignedInt|null` is an `Option`,
+/// so a conforming `null` ("no limit") parses instead of failing the whole
+/// capability. `maxSizeMailboxName` stays required: §1.3.1 types it as a plain
+/// `UnsignedInt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailCapabilities {
+    /// `UnsignedInt|null` (RFC 8621 §1.3.1); `None` means no limit.
     #[serde(rename = "maxMailboxesPerEmail")]
     max_mailboxes_per_email: Option<usize>,
 
+    /// `UnsignedInt|null` (RFC 8621 §1.3.1); `None` means no limit.
     #[serde(rename = "maxMailboxDepth")]
-    max_mailbox_depth: usize,
+    max_mailbox_depth: Option<usize>,
 
+    /// `UnsignedInt` (RFC 8621 §1.3.1), always present.
     #[serde(rename = "maxSizeMailboxName")]
     max_size_mailbox_name: usize,
 
+    /// RFC 8621 §1.3.1 types this as a plain `UnsignedInt`, so a conforming
+    /// server always sends a number. It is modelled as an `Option` anyway, as a
+    /// deliberate deviation: because `Capabilities` is matched on shape, a
+    /// single unparseable member drops the whole block to
+    /// `Capabilities::Other` and every mail limit is lost, which is a worse
+    /// outcome than reading one limit as unknown.
     #[serde(rename = "maxSizeAttachmentsPerEmail")]
-    max_size_attachments_per_email: usize,
+    max_size_attachments_per_email: Option<usize>,
 
+    /// `String[]` (RFC 8621 §1.3.1), always present.
     #[serde(rename = "emailQuerySortOptions")]
     email_query_sort_options: Vec<String>,
 
+    /// `Boolean` (RFC 8621 §1.3.1), always present.
     #[serde(rename = "mayCreateTopLevelMailbox")]
     may_create_top_level_mailbox: bool,
 }
 
+/// The `urn:ietf:params:jmap:submission` capability block (RFC 8621 §1.3.2).
+///
+/// RFC 8621 §1.3.2 says the value of this capability in the *session*
+/// `capabilities` property is an **empty object**, and that `maxDelayedSend`
+/// and `submissionExtensions` live in an account's `accountCapabilities`. Read
+/// them through
+/// [`crate::core::session::Account::submission_capabilities`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmissionCapabilities {
+    /// `UnsignedInt` (RFC 8621 §1.3.2).
     #[serde(rename = "maxDelayedSend")]
     max_delayed_send: usize,
 
+    /// RFC 8621 §1.3.2 types `submissionExtensions` as `String[String[]]`: a
+    /// map whose keys are the SMTP extension "ehlo-name" and whose values are
+    /// that extension's "ehlo-args", for example
+    /// `{"SIZE": ["1229782938"], "DSN": [], "UTF8ONLY": []}`.
     #[serde(rename = "submissionExtensions")]
-    submission_extensions: Vec<String>,
+    submission_extensions: AHashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -815,11 +851,15 @@ impl GetArguments {
 }
 
 impl MailCapabilities {
+    /// `None` when the server sent `null`, i.e. there is no limit
+    /// (RFC 8621 §1.3.1).
     pub fn max_mailboxes_per_email(&self) -> Option<usize> {
         self.max_mailboxes_per_email
     }
 
-    pub fn max_mailbox_depth(&self) -> usize {
+    /// `None` when the server sent `null`, i.e. there is no limit
+    /// (RFC 8621 §1.3.1).
+    pub fn max_mailbox_depth(&self) -> Option<usize> {
         self.max_mailbox_depth
     }
 
@@ -827,7 +867,9 @@ impl MailCapabilities {
         self.max_size_mailbox_name
     }
 
-    pub fn max_size_attachments_per_email(&self) -> usize {
+    /// `None` only if the server sent `null`, which RFC 8621 §1.3.1 does not
+    /// allow for this property; see the field's note on why that is tolerated.
+    pub fn max_size_attachments_per_email(&self) -> Option<usize> {
         self.max_size_attachments_per_email
     }
 
@@ -845,7 +887,10 @@ impl SubmissionCapabilities {
         self.max_delayed_send
     }
 
-    pub fn submission_extensions(&self) -> &[String] {
+    /// The `submissionExtensions` map (RFC 8621 §1.3.2): each key is an SMTP
+    /// submission extension's "ehlo-name", each value that extension's
+    /// "ehlo-args" (empty when it takes none).
+    pub fn submission_extensions(&self) -> &AHashMap<String, Vec<String>> {
         &self.submission_extensions
     }
 }
@@ -1311,10 +1356,9 @@ mod tests {
         }
     }
 
-    /// RFC 8621 §2 — the `urn:ietf:params:jmap:mail` capability block.
-    /// `maxMailboxesPerEmail` is genuinely optional (null = no limit);
-    /// `maxMailboxDepth` is not (Finding #30), so the fixture sends an
-    /// integer.
+    /// RFC 8621 §1.3.1 — the `urn:ietf:params:jmap:mail` capability block.
+    /// `maxMailboxesPerEmail` and `maxMailboxDepth` are `UnsignedInt|null`, so
+    /// `null` is a conforming value meaning "no limit", not a parse error.
     #[test]
     fn mail_capability_accessors_read_the_session_block() {
         let caps: MailCapabilities = serde_json::from_value(json!({
@@ -1330,9 +1374,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(caps.max_mailboxes_per_email(), None);
-        assert_eq!(caps.max_mailbox_depth(), 10);
+        assert_eq!(caps.max_mailbox_depth(), Some(10));
         assert_eq!(caps.max_size_mailbox_name(), 255);
-        assert_eq!(caps.max_size_attachments_per_email(), 33_554_432);
+        assert_eq!(caps.max_size_attachments_per_email(), Some(33_554_432));
         assert_eq!(
             caps.email_query_sort_options(),
             ["receivedAt", "size", "subject", "displayTo", "threadId"]
@@ -1349,27 +1393,63 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(limited.max_mailboxes_per_email(), Some(1));
+        assert_eq!(limited.max_mailbox_depth(), Some(1));
+        assert_eq!(limited.max_size_attachments_per_email(), Some(1024));
         assert!(!limited.may_create_top_level_mailbox());
         assert!(limited.email_query_sort_options().is_empty());
     }
 
-    /// RFC 8621 §2 — the `urn:ietf:params:jmap:submission` capability
-    /// block. `submissionExtensions` is an array of strings here, not the
-    /// object RFC 8621 §4.3 also allows (Finding #2).
+    /// RFC 8621 §1.3.1 — `maxMailboxDepth` is `UnsignedInt|null`: a server with
+    /// no limit on the mailbox hierarchy depth sends `null`, and that must
+    /// parse rather than push the whole capability into `Capabilities::Other`.
+    #[test]
+    fn mail_capability_accepts_a_null_depth_and_attachment_limit() {
+        let caps: MailCapabilities = serde_json::from_value(json!({
+            "maxMailboxesPerEmail": null,
+            "maxMailboxDepth": null,
+            "maxSizeMailboxName": 255,
+            "maxSizeAttachmentsPerEmail": null,
+            "emailQuerySortOptions": ["receivedAt"],
+            "mayCreateTopLevelMailbox": true
+        }))
+        .expect("RFC 8621 §1.3.1 allows null for maxMailboxDepth");
+
+        assert_eq!(caps.max_mailbox_depth(), None);
+        assert_eq!(caps.max_size_attachments_per_email(), None);
+        assert_eq!(caps.max_size_mailbox_name(), 255);
+    }
+
+    /// RFC 8621 §1.3.2 — the `urn:ietf:params:jmap:submission` capability
+    /// block. `submissionExtensions` is `String[String[]]`: an object keyed by
+    /// the extension's ehlo-name whose value is that extension's ehlo-args.
     #[test]
     fn submission_capability_accessors_read_the_session_block() {
         let caps: SubmissionCapabilities = serde_json::from_value(json!({
             "maxDelayedSend": 1209600,
-            "submissionExtensions": ["SIZE", "DSN", "UTF8ONLY"]
+            "submissionExtensions": {
+                "SIZE": ["1229782938"],
+                "DSN": [],
+                "UTF8ONLY": []
+            }
         }))
-        .unwrap();
+        .expect("RFC 8621 §1.3.2 submissionExtensions is a map of name to args");
 
         assert_eq!(caps.max_delayed_send(), 1_209_600);
-        assert_eq!(caps.submission_extensions(), ["SIZE", "DSN", "UTF8ONLY"]);
+        let extensions = caps.submission_extensions();
+        assert_eq!(extensions.len(), 3);
+        assert_eq!(
+            extensions.get("SIZE").map(Vec::as_slice),
+            Some(&["1229782938".to_string()][..]),
+            "the ehlo-args survive the round trip through the map"
+        );
+        assert_eq!(extensions.get("DSN").map(Vec::as_slice), Some(&[][..]));
+        assert_eq!(extensions.get("UTF8ONLY").map(Vec::as_slice), Some(&[][..]));
+        assert_eq!(extensions.get("PIPELINING"), None);
 
-        let bare: SubmissionCapabilities =
-            serde_json::from_value(json!({ "maxDelayedSend": 0, "submissionExtensions": [] }))
-                .unwrap();
+        let bare: SubmissionCapabilities = serde_json::from_value(json!(
+            { "maxDelayedSend": 0, "submissionExtensions": {} }
+        ))
+        .unwrap();
         assert_eq!(bare.max_delayed_send(), 0);
         assert!(bare.submission_extensions().is_empty());
     }

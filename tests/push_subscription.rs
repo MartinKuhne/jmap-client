@@ -75,12 +75,12 @@ fn push_get_body(list: Vec<Value>, not_found: Vec<&str>) -> Value {
 }
 
 /// RFC 8620 §7.2.3 — the two subscriptions the opening `PushSubscription/get`
-/// of the example returns.
+/// of the example returns, spelled exactly as the RFC spells them.
 ///
-/// One deviation: the RFC's first subscription has `"types": [ "Todo" ]`, but
-/// this crate's `DataType` is a *closed* enum with no catch-all variant, so an
-/// application-defined type name fails to deserialise. `Mailbox` stands in for
-/// `Todo` here (recorded as a Finding).
+/// The first subscription's `"types": [ "Todo" ]` is an application-defined
+/// data type name. RFC 8620 §7.2 types `types` as `String[]|null`, so an
+/// unmodelled name parses into `DataType::Other("Todo")` instead of failing the
+/// whole response.
 fn rfc_example_subscriptions() -> Vec<Value> {
     vec![
         json!({
@@ -88,7 +88,7 @@ fn rfc_example_subscriptions() -> Vec<Value> {
             "deviceClientId": "b37ff8001ca0",
             "verificationCode": "b210ef734fe5f439c1ca386421359f7b",
             "expires": "2018-07-31T00:13:21Z",
-            "types": [ "Mailbox" ]
+            "types": [ "Todo" ]
         }),
         json!({
             "id": "f2d0aab5-e976-4e8b-ad4b-b380a5b987e4",
@@ -150,7 +150,11 @@ async fn push_subscription_get_returns_the_rfc_example_list() {
         Some("b210ef734fe5f439c1ca386421359f7b")
     );
     assert_eq!(first.expires(), Some(1_532_996_001));
-    assert_eq!(first.types(), Some(&[DataType::Mailbox][..]));
+    assert_eq!(
+        first.types(),
+        Some(&[DataType::Other("Todo".to_string())][..]),
+        "an unmodelled data type name is kept verbatim (RFC 8620 §7.2)"
+    );
 
     let second = &response.list()[1];
     assert_eq!(second.device_client_id(), Some("X8980fc"));

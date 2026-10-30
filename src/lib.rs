@@ -343,54 +343,146 @@ pub enum Method {
     Error,
 }
 
-#[derive(Debug, Serialize, Deserialize, Eq, PartialEq, Hash, Clone)]
+/// A JMAP data type name.
+///
+/// RFC 8620 §7.2 types `types` as `String[]|null`: a list of JMAP data type
+/// names. A server is free to report a type this crate has never heard of —
+/// any extension's data type, or an application-defined one such as the
+/// `"Todo"` of RFC 8620 §7.2.3 — so [`DataType::Other`] carries an unmodelled
+/// name verbatim instead of letting one unknown entry fail the whole response.
+///
+/// The explicit discriminants are preserved. They can no longer be read with an
+/// `as` cast, because an enum with a data-carrying variant is not field-less
+/// (E0605); `#[repr(u8)]` is what makes explicit discriminants and the
+/// `Other(String)` variant legal together at all (E0732). Nothing in this crate
+/// ever cast a `DataType` to an integer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum DataType {
-    #[serde(rename = "Email")]
     Email = 0,
-    #[serde(rename = "EmailDelivery")]
     EmailDelivery = 1,
-    #[serde(rename = "EmailSubmission")]
     EmailSubmission = 2,
-    #[serde(rename = "Mailbox")]
     Mailbox = 3,
-    #[serde(rename = "Thread")]
     Thread = 4,
-    #[serde(rename = "Identity")]
     Identity = 5,
-    #[serde(rename = "Core")]
     Core = 6,
-    #[serde(rename = "PushSubscription")]
     PushSubscription = 7,
-    #[serde(rename = "SearchSnippet")]
     SearchSnippet = 8,
-    #[serde(rename = "VacationResponse")]
     VacationResponse = 9,
-    #[serde(rename = "MDN")]
     Mdn = 10,
-    #[serde(rename = "Quota")]
     Quota = 11,
-    #[serde(rename = "SieveScript")]
     SieveScript = 12,
-    #[serde(rename = "Calendar")]
     Calendar = 13,
-    #[serde(rename = "CalendarEvent")]
     CalendarEvent = 14,
-    #[serde(rename = "CalendarEventNotification")]
     CalendarEventNotification = 15,
-    #[serde(rename = "AddressBook")]
     AddressBook = 16,
-    #[serde(rename = "ContactCard")]
     ContactCard = 17,
-    #[serde(rename = "FileNode")]
     FileNode = 18,
-    #[serde(rename = "Principal")]
     Principal = 19,
-    #[serde(rename = "ShareNotification")]
     ShareNotification = 20,
-    #[serde(rename = "ParticipantIdentity")]
     ParticipantIdentity = 21,
-    #[serde(rename = "CalendarAlert")]
     CalendarAlert = 22,
+    /// A data type name this crate does not model (RFC 8620 §7.2 permits any
+    /// extension's name). The name is kept exactly as it arrived on the wire.
+    Other(String),
+}
+
+impl DataType {
+    /// The JMAP data type name this value is, or carries, on the wire.
+    pub fn as_str(&self) -> &str {
+        match self {
+            DataType::Email => "Email",
+            DataType::EmailDelivery => "EmailDelivery",
+            DataType::EmailSubmission => "EmailSubmission",
+            DataType::Mailbox => "Mailbox",
+            DataType::Thread => "Thread",
+            DataType::Identity => "Identity",
+            DataType::Core => "Core",
+            DataType::PushSubscription => "PushSubscription",
+            DataType::SearchSnippet => "SearchSnippet",
+            DataType::VacationResponse => "VacationResponse",
+            DataType::Mdn => "MDN",
+            DataType::Quota => "Quota",
+            DataType::SieveScript => "SieveScript",
+            DataType::Calendar => "Calendar",
+            DataType::CalendarEvent => "CalendarEvent",
+            DataType::CalendarEventNotification => "CalendarEventNotification",
+            DataType::AddressBook => "AddressBook",
+            DataType::ContactCard => "ContactCard",
+            DataType::FileNode => "FileNode",
+            DataType::Principal => "Principal",
+            DataType::ShareNotification => "ShareNotification",
+            DataType::ParticipantIdentity => "ParticipantIdentity",
+            DataType::CalendarAlert => "CalendarAlert",
+            DataType::Other(name) => name,
+        }
+    }
+}
+
+impl Display for DataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// Written by hand rather than derived: a derived `Other(String)` would be
+// externally tagged (`{"Other":"Todo"}`), while RFC 8620 §7.2 puts a bare data
+// type name on the wire. `Result` here is the crate's own alias, so the serde
+// traits' results are spelled out.
+impl Serialize for DataType {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+struct DataTypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DataTypeVisitor {
+    type Value = DataType;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a JMAP data type name")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        Ok(match value {
+            "Email" => DataType::Email,
+            "EmailDelivery" => DataType::EmailDelivery,
+            "EmailSubmission" => DataType::EmailSubmission,
+            "Mailbox" => DataType::Mailbox,
+            "Thread" => DataType::Thread,
+            "Identity" => DataType::Identity,
+            "Core" => DataType::Core,
+            "PushSubscription" => DataType::PushSubscription,
+            "SearchSnippet" => DataType::SearchSnippet,
+            "VacationResponse" => DataType::VacationResponse,
+            "MDN" => DataType::Mdn,
+            "Quota" => DataType::Quota,
+            "SieveScript" => DataType::SieveScript,
+            "Calendar" => DataType::Calendar,
+            "CalendarEvent" => DataType::CalendarEvent,
+            "CalendarEventNotification" => DataType::CalendarEventNotification,
+            "AddressBook" => DataType::AddressBook,
+            "ContactCard" => DataType::ContactCard,
+            "FileNode" => DataType::FileNode,
+            "Principal" => DataType::Principal,
+            "ShareNotification" => DataType::ShareNotification,
+            "ParticipantIdentity" => DataType::ParticipantIdentity,
+            "CalendarAlert" => DataType::CalendarAlert,
+            name => DataType::Other(name.to_string()),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for DataType {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_str(DataTypeVisitor)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -504,36 +596,6 @@ impl Display for Error {
     }
 }
 
-impl Display for DataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DataType::Mailbox => write!(f, "Mailbox"),
-            DataType::Thread => write!(f, "Thread"),
-            DataType::Email => write!(f, "Email"),
-            DataType::EmailDelivery => write!(f, "EmailDelivery"),
-            DataType::Identity => write!(f, "Identity"),
-            DataType::EmailSubmission => write!(f, "EmailSubmission"),
-            DataType::CalendarAlert => write!(f, "CalendarAlert"),
-            DataType::Core => write!(f, "Core"),
-            DataType::PushSubscription => write!(f, "PushSubscription"),
-            DataType::SearchSnippet => write!(f, "SearchSnippet"),
-            DataType::VacationResponse => write!(f, "VacationResponse"),
-            DataType::Mdn => write!(f, "MDN"),
-            DataType::Quota => write!(f, "Quota"),
-            DataType::SieveScript => write!(f, "SieveScript"),
-            DataType::Calendar => write!(f, "Calendar"),
-            DataType::CalendarEvent => write!(f, "CalendarEvent"),
-            DataType::CalendarEventNotification => write!(f, "CalendarEventNotification"),
-            DataType::AddressBook => write!(f, "AddressBook"),
-            DataType::ContactCard => write!(f, "ContactCard"),
-            DataType::FileNode => write!(f, "FileNode"),
-            DataType::Principal => write!(f, "Principal"),
-            DataType::ShareNotification => write!(f, "ShareNotification"),
-            DataType::ParticipantIdentity => write!(f, "ParticipantIdentity"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,9 +632,9 @@ mod tests {
         }
     }
 
-    /// RFC 8620 §5.2 / RFC 8621 — `Display for DataType` must agree with
-    /// the serde rename, otherwise a state string printed by a client
-    /// would not match the type name on the wire.
+    /// RFC 8620 §7.2 — every `DataType` must render, serialise and parse as the
+    /// exact data type name on the wire, so a state string printed by a client
+    /// matches the name the server sent.
     #[test]
     fn data_type_display_matches_the_serde_rename() {
         let cases: &[(DataType, &str)] = &[
@@ -601,15 +663,65 @@ mod tests {
             (DataType::CalendarAlert, "CalendarAlert"),
         ];
 
-        assert_eq!(cases.len(), 23, "all twenty-three data types");
+        assert_eq!(cases.len(), 23, "all twenty-three modelled data types");
         for (data_type, name) in cases {
+            assert_eq!(data_type.as_str(), *name, "{data_type:?} as_str");
             assert_eq!(data_type.to_string(), *name, "{data_type:?} Display");
             assert_eq!(
                 serde_json::to_value(data_type).unwrap(),
                 serde_json::to_value(name).unwrap(),
                 "{data_type:?} must serialise to the same name it renders as"
             );
+            assert_eq!(
+                &serde_json::from_value::<DataType>(serde_json::to_value(name).unwrap()).unwrap(),
+                data_type,
+                "{name} must parse back to {data_type:?}, not to `Other`"
+            );
         }
+    }
+
+    /// RFC 8620 §7.2 — `types` is a `String[]|null` of JMAP data type names and
+    /// a server may report a type the client has never heard of. Such a name
+    /// must survive as `DataType::Other`, both as an array entry and as a map
+    /// key in a `StateChange`'s `changed` object.
+    #[test]
+    fn an_unmodelled_data_type_is_kept_as_other() {
+        let unknown: DataType = serde_json::from_value(serde_json::json!("Todo")).unwrap();
+        assert_eq!(unknown, DataType::Other("Todo".to_string()));
+        assert_eq!(unknown.as_str(), "Todo");
+        assert_eq!(unknown.to_string(), "Todo");
+        assert_eq!(
+            serde_json::to_value(&unknown).unwrap(),
+            serde_json::json!("Todo"),
+            "Other must serialise as the bare name, not as an externally tagged object"
+        );
+
+        // The RFC 8620 §7.2.3 example subscription, whose first entry lists the
+        // application-defined "Todo" type.
+        let types: Vec<DataType> = serde_json::from_value(serde_json::json!(["Todo"])).unwrap();
+        assert_eq!(types, [DataType::Other("Todo".to_string())]);
+
+        // A `StateChange`'s `changed` map is keyed by data type name.
+        let changed: AHashMap<DataType, String> = serde_json::from_value(serde_json::json!({
+            "Todo": "1", "Mailbox": "2", "VendorExtension": "3"
+        }))
+        .unwrap();
+        assert_eq!(
+            changed
+                .get(&DataType::Other("Todo".to_string()))
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            changed.get(&DataType::Mailbox).map(String::as_str),
+            Some("2")
+        );
+        assert_eq!(
+            changed
+                .get(&DataType::Other("VendorExtension".to_string()))
+                .map(String::as_str),
+            Some("3")
+        );
     }
 
     #[test]

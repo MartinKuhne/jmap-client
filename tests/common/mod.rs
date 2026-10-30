@@ -129,7 +129,9 @@ fn core_capability() -> Value {
 /// empty object and only the per-account value carries the limits. The client's
 /// `Capabilities` enum is untagged and would file a session-level `{}` under
 /// `Empty`, making `Session::mail_capabilities()` return `None`; we therefore
-/// put the full object at session level too so the accessor is testable.
+/// put the full object at session level too so that accessor is testable, and
+/// the RFC-conformant shape (limits on the account only) is pinned by
+/// `an_rfc_shaped_session_leaves_the_session_level_limit_accessors_empty`.
 fn mail_capability() -> Value {
     json!({
         "maxMailboxesPerEmail": null,
@@ -152,13 +154,16 @@ fn mail_capability() -> Value {
 
 /// The `urn:ietf:params:jmap:submission` capability object (RFC 8621 §1.3.2).
 ///
-/// `submissionExtensions` is an **array of strings** here: RFC 8621 §4.3 also
-/// allows the object form `{"SIZE": {…}}`, but `jmap_client` models it as
-/// `Vec<String>` and the object form fails to deserialise (Findings #2).
+/// `submissionExtensions` is `String[String[]]`: an object keyed by the SMTP
+/// extension's ehlo-name whose value is that extension's ehlo-args.
 fn submission_capability() -> Value {
     json!({
         "maxDelayedSend": 4_294_967_295u64,
-        "submissionExtensions": ["SIZE", "DSN", "UTF8ONLY"]
+        "submissionExtensions": {
+            "SIZE": ["1229782938"],
+            "DSN": [],
+            "UTF8ONLY": []
+        }
     })
 }
 

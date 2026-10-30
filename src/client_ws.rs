@@ -155,7 +155,16 @@ enum WebSocketMessage_ {
 #[derive(Debug)]
 pub enum WebSocketMessage {
     Response(Response<TaggedMethodResponse>),
-    PushNotification(PushObject),
+    /// A push notification, with the RFC 8887 §5.2 `pushState` kept alongside
+    /// the [`PushObject`].
+    ///
+    /// RFC 8887 §5.2 defines the WebSocketPush object as a PushNotification
+    /// plus `pushState: String|null`, the id of the last event. That token is
+    /// what a client passes back to `Client::enable_push_ws` after reconnecting
+    /// so the server replays what it missed (RFC 8620 §7.1 `Last-Event-ID`);
+    /// without it, live push cannot be resumed. Read the notification itself
+    /// through `.push` and the resume token through `.push_state`.
+    PushNotification(WebSocketPushObject),
 }
 
 pub struct WsStream {
@@ -283,7 +292,10 @@ impl Client {
                                     )))
                                 }
                                 WebSocketMessage_::PushNotification(push) => {
-                                    yield Ok(WebSocketMessage::PushNotification(push.push))
+                                    // RFC 8887 §5.2: carry `pushState` through with the
+                                    // notification; it is the token a client needs to
+                                    // resume push after a reconnect.
+                                    yield Ok(WebSocketMessage::PushNotification(push))
                                 }
                                 WebSocketMessage_::Error(err) => yield Err(ProblemDetails::from(err).into()),
                             },
