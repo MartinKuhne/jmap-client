@@ -222,7 +222,10 @@ async fn a_state_change_arrives_with_its_event_id_account_and_types() {
     let drained = changes
         .account_changes(ACCOUNT)
         .expect("the account is present the first time");
-    assert_eq!(drained.get(&DataType::Mailbox).map(String::as_str), Some("42"));
+    assert_eq!(
+        drained.get(&DataType::Mailbox).map(String::as_str),
+        Some("42")
+    );
     assert!(
         changes.account_changes(ACCOUNT).is_none(),
         "account_changes removes what it returns"
@@ -254,7 +257,10 @@ async fn the_types_parameter_hides_the_types_that_were_not_asked_for() {
         Some(mailbox_event.to_string()).as_deref(),
         "the Email change must not have been delivered to a Mailbox-only stream"
     );
-    assert_eq!(changed_types(&changes), vec![("Mailbox".to_string(), "2".to_string())]);
+    assert_eq!(
+        changed_types(&changes),
+        vec![("Mailbox".to_string(), "2".to_string())]
+    );
     assert!(!changes.has_type(DataType::Email));
 }
 
@@ -294,7 +300,10 @@ async fn a_state_change_split_across_two_reads_is_delivered_once() {
     let second = server.handle().trigger_state_change("Email", "2");
     let changes = into_changes(next_notification(&mut stream).await);
     assert_eq!(changes.id(), Some(second.to_string()).as_deref());
-    assert_eq!(changed_types(&changes), vec![("Email".to_string(), "2".to_string())]);
+    assert_eq!(
+        changed_types(&changes),
+        vec![("Email".to_string(), "2".to_string())]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +361,10 @@ async fn a_ping_keepalive_is_written_and_the_stream_keeps_delivering() {
     let pushed = server.handle().trigger_state_change("Mailbox", "7");
     let changes = into_changes(next_notification(&mut stream).await);
     assert_eq!(changes.id(), Some(pushed.to_string()).as_deref());
-    assert_eq!(changed_types(&changes), vec![("Mailbox".to_string(), "7".to_string())]);
+    assert_eq!(
+        changed_types(&changes),
+        vec![("Mailbox".to_string(), "7".to_string())]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -380,13 +392,19 @@ async fn last_event_id_replays_only_what_the_client_missed() {
     // Only id 2 is replayed; id 1 is the client's own resume point.
     let replayed = into_changes(next_notification(&mut stream).await);
     assert_eq!(replayed.id(), Some("2"));
-    assert_eq!(changed_types(&replayed), vec![("Email".to_string(), "2".to_string())]);
+    assert_eq!(
+        changed_types(&replayed),
+        vec![("Email".to_string(), "2".to_string())]
+    );
 
     // Live delivery continues from the resume point with no gap and no overlap.
     let third = server.handle().trigger_state_change("Identity", "3");
     let live = into_changes(next_notification(&mut stream).await);
     assert_eq!(live.id(), Some(third.to_string()).as_deref());
-    assert_eq!(changed_types(&live), vec![("Identity".to_string(), "3".to_string())]);
+    assert_eq!(
+        changed_types(&live),
+        vec![("Identity".to_string(), "3".to_string())]
+    );
 }
 
 #[tokio::test]
@@ -484,8 +502,7 @@ async fn email_push_over_sse_is_reported_as_an_unsupported_variant() {
 
     let err = next_error(&mut stream).await;
     assert!(
-        err.to_string()
-            .contains("Unexpected PushObject variant"),
+        err.to_string().contains("Unexpected PushObject variant"),
         "the SSE parser rejects EmailPush; got: {err}"
     );
 
@@ -529,7 +546,10 @@ fn changes_accessors_round_trip_a_hand_built_state_change() {
     // An account whose map is empty does not make the notification non-empty:
     // `is_empty` looks at the type maps, not the account keys.
     assert!(!changes.is_empty());
-    assert_eq!(changes.changes("account2").map(|iter| iter.count()), Some(0));
+    assert_eq!(
+        changes.changes("account2").map(|iter| iter.count()),
+        Some(0)
+    );
     assert_eq!(changes.changes("nope").map(|iter| iter.count()), None);
     assert_eq!(changes.into_inner().len(), 2);
 }

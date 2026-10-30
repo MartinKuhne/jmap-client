@@ -72,7 +72,15 @@ mod tests {
     /// than silently accepted.
     #[test]
     fn camel_case_and_unknown_names_are_rejected() {
-        for name in ["", "Types", "closeAfter", "CloseAfter", "types[]", "state", " ping"] {
+        for name in [
+            "",
+            "Types",
+            "closeAfter",
+            "CloseAfter",
+            "types[]",
+            "state",
+            " ping",
+        ] {
             assert!(
                 URLParameter::parse(name).is_none(),
                 "{name:?} must not parse as an event-source placeholder"

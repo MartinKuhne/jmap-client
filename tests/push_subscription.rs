@@ -22,9 +22,7 @@
 #![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
-use common::{
-    connected_client, jmap_response, mount_jmap, single_jmap_request, SESSION_STATE,
-};
+use common::{connected_client, jmap_response, mount_jmap, single_jmap_request, SESSION_STATE};
 use jmap_client::core::set::{SetErrorType, SetObject};
 use jmap_client::push_subscription::{Keys, Property, PushSubscription};
 use jmap_client::{DataType, Error, Get};
@@ -135,7 +133,9 @@ async fn push_subscription_get_returns_the_rfc_example_list() {
     .await;
 
     let mut request = client.build();
-    request.get_push_subscription().ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
+    request
+        .get_push_subscription()
+        .ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
     let response = request.send_get_push_subscription().await.unwrap();
 
     assert_eq!(response.list().len(), 2);
@@ -207,7 +207,9 @@ async fn push_subscription_get_parses_a_compliant_response_with_no_state_member(
     .await;
 
     let mut request = client.build();
-    request.get_push_subscription().ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
+    request
+        .get_push_subscription()
+        .ids(["e50b2c1d-9553-41a3-b0a7-a7d26b599ee1"]);
     let response = request
         .send_get_push_subscription()
         .await
@@ -292,7 +294,10 @@ async fn a_subscription_without_keys_reads_as_none() {
 
     let sub = &response.list()[0];
     assert!(sub.keys().is_none());
-    assert!(sub.types().is_none(), "`types` absent means push everything");
+    assert!(
+        sub.types().is_none(),
+        "`types` absent means push everything"
+    );
     assert!(sub.expires().is_none());
 }
 
@@ -586,7 +591,10 @@ async fn a_method_level_error_short_circuits_the_request() {
     let client = connected_client(&server).await;
     mount_jmap(
         &server,
-        jmap_response(vec![method_error("s0", "cannotCalculateChanges")], SESSION_STATE),
+        jmap_response(
+            vec![method_error("s0", "cannotCalculateChanges")],
+            SESSION_STATE,
+        ),
     )
     .await;
 
@@ -698,8 +706,7 @@ async fn send_set_push_subscription_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "PushSubscription/set",
+        body["methodCalls"][0][0], "PushSubscription/set",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");

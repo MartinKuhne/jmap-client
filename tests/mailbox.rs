@@ -158,7 +158,12 @@ fn query_body(ids: Vec<&str>) -> Value {
 async fn mailbox_get_returns_the_rfc_inbox_record() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Mailbox/get", mailbox_get_body(vec![rfc_inbox()], vec![])).await;
+    mount_one(
+        &server,
+        "Mailbox/get",
+        mailbox_get_body(vec![rfc_inbox()], vec![]),
+    )
+    .await;
 
     let mailbox = client
         .mailbox_get("MB23cfa8094c0f41e6", None::<MailboxProps>)
@@ -204,7 +209,12 @@ async fn mailbox_get_returns_the_rfc_inbox_record() {
 async fn mailbox_get_with_an_explicit_property_list_sends_every_name() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Mailbox/get", mailbox_get_body(vec![], vec!["MB23cfa8094c0f41e6"])).await;
+    mount_one(
+        &server,
+        "Mailbox/get",
+        mailbox_get_body(vec![], vec!["MB23cfa8094c0f41e6"]),
+    )
+    .await;
 
     let mailbox = client
         .mailbox_get(
@@ -311,7 +321,12 @@ async fn mailbox_role_deserialises_case_insensitively_and_keeps_unknown_roles() 
 async fn mailbox_rights_project_to_an_acl_list_in_declaration_order() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Mailbox/get", mailbox_get_body(vec![rfc_inbox()], vec![])).await;
+    mount_one(
+        &server,
+        "Mailbox/get",
+        mailbox_get_body(vec![rfc_inbox()], vec![]),
+    )
+    .await;
 
     let mailbox = client
         .mailbox_get("MB23cfa8094c0f41e6", Some([Property::MyRights]))
@@ -583,10 +598,7 @@ async fn mailbox_set_can_create_and_update_and_destroy_in_one_call() {
     assert!(response.has_created());
     assert!(response.has_updated());
     assert!(response.has_destroyed());
-    assert_eq!(
-        response.created("c0").unwrap().name(),
-        Some("Projects")
-    );
+    assert_eq!(response.created("c0").unwrap().name(), Some("Projects"));
     assert_eq!(
         response.take_destroyed_ids().unwrap(),
         vec!["MB23cfa8094c0f41e6"]
@@ -799,9 +811,7 @@ async fn mailbox_query_with_the_tree_arguments_sorts_and_filters_as_a_tree() {
     let mut request = client.build();
     {
         let query = request.query_mailbox();
-        query.filter(mailbox_query::Filter::parent_id(Some(
-            "MB23cfa8094c0f41e6",
-        )));
+        query.filter(mailbox_query::Filter::parent_id(Some("MB23cfa8094c0f41e6")));
         query.arguments().sort_as_tree(true).filter_as_tree(true);
         query.limit(10).calculate_total(true);
     }
@@ -811,7 +821,10 @@ async fn mailbox_query_with_the_tree_arguments_sorts_and_filters_as_a_tree() {
     // RFC 8621 §2.3: sortAsTree keeps an ancestor before its descendant;
     // filterAsTree only includes a Mailbox whose ancestors also match.
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[1]["filter"], json!({ "parentId": "MB23cfa8094c0f41e6" }));
+    assert_eq!(
+        call[1]["filter"],
+        json!({ "parentId": "MB23cfa8094c0f41e6" })
+    );
     assert_eq!(call[1]["sortAsTree"], true);
     assert_eq!(call[1]["filterAsTree"], true);
     assert_eq!(call[1]["limit"], 10);
@@ -936,12 +949,14 @@ async fn mailbox_changes_reports_updated_properties_and_id_lists() {
     // through `arguments()`, not a core changes member.
     assert_eq!(
         response.arguments().updated_properties(),
-        Some(&[
-            Property::TotalEmails,
-            Property::UnreadEmails,
-            Property::TotalThreads,
-            Property::UnreadThreads
-        ][..])
+        Some(
+            &[
+                Property::TotalEmails,
+                Property::UnreadEmails,
+                Property::TotalThreads,
+                Property::UnreadThreads
+            ][..]
+        )
     );
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
@@ -1026,7 +1041,9 @@ async fn mailbox_query_error_does_not_stop_a_paired_get_from_unwrapping() {
     .await;
 
     let mut request = client.build();
-    request.query_mailbox().filter(mailbox_query::Filter::role(Role::Inbox));
+    request
+        .query_mailbox()
+        .filter(mailbox_query::Filter::role(Role::Inbox));
     request.get_mailbox().ids(["MB23cfa8094c0f41e6"]);
     let mut response = request.send().await.unwrap();
 

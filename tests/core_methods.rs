@@ -370,7 +370,10 @@ async fn connect_maps_problem_json_to_error_problem() {
     }
     assert_eq!(problem.status(), Some(401));
     assert_eq!(problem.title(), Some("Unauthorized"));
-    assert_eq!(problem.detail(), Some("The supplied credentials are not valid."));
+    assert_eq!(
+        problem.detail(),
+        Some("The supplied credentials are not valid.")
+    );
     assert_eq!(problem.limit(), None);
 }
 
@@ -525,11 +528,7 @@ async fn multi_method_request_returns_both_responses_in_order() {
         &server,
         jmap_response(
             vec![
-                inv(
-                    "Mailbox/get",
-                    "s0",
-                    mailbox_get_body(ACCOUNT_ID, "78540"),
-                ),
+                inv("Mailbox/get", "s0", mailbox_get_body(ACCOUNT_ID, "78540")),
                 inv("Email/query", "s1", email_query_body(ACCOUNT_ID)),
             ],
             SESSION_STATE,
@@ -585,11 +584,7 @@ async fn method_responses_can_be_looked_up_by_call_id_and_position() {
         &server,
         jmap_response(
             vec![
-                inv(
-                    "Mailbox/get",
-                    "s0",
-                    mailbox_get_body(ACCOUNT_ID, "78540"),
-                ),
+                inv("Mailbox/get", "s0", mailbox_get_body(ACCOUNT_ID, "78540")),
                 inv("Email/query", "s1", email_query_body(ACCOUNT_ID)),
             ],
             SESSION_STATE,
@@ -631,16 +626,8 @@ async fn last_result_reference_serialises_as_result_of_name_path() {
         &server,
         jmap_response(
             vec![
-                inv(
-                    "Mailbox/get",
-                    "s0",
-                    mailbox_get_body(ACCOUNT_ID, "78540"),
-                ),
-                inv(
-                    "Mailbox/get",
-                    "s1",
-                    mailbox_get_body(ACCOUNT_ID, "78541"),
-                ),
+                inv("Mailbox/get", "s0", mailbox_get_body(ACCOUNT_ID, "78540")),
+                inv("Mailbox/get", "s1", mailbox_get_body(ACCOUNT_ID, "78541")),
             ],
             SESSION_STATE,
         ),
@@ -687,17 +674,9 @@ async fn result_reference_can_target_an_earlier_call_by_index() {
         &server,
         jmap_response(
             vec![
-                inv(
-                    "Mailbox/get",
-                    "s0",
-                    mailbox_get_body(ACCOUNT_ID, "78540"),
-                ),
+                inv("Mailbox/get", "s0", mailbox_get_body(ACCOUNT_ID, "78540")),
                 inv("Email/query", "s1", email_query_body(ACCOUNT_ID)),
-                inv(
-                    "Mailbox/get",
-                    "s2",
-                    mailbox_get_body(ACCOUNT_ID, "78541"),
-                ),
+                inv("Mailbox/get", "s2", mailbox_get_body(ACCOUNT_ID, "78541")),
             ],
             SESSION_STATE,
         ),
@@ -896,7 +875,9 @@ async fn advertised_capability_is_present_in_using() {
         .is_none());
 
     let client = connected_client_json(&server, sieve_session).await;
-    assert!(client.session().has_capability("urn:ietf:params:jmap:sieve"));
+    assert!(client
+        .session()
+        .has_capability("urn:ietf:params:jmap:sieve"));
 
     mount_jmap(
         &server,
@@ -1006,11 +987,7 @@ async fn method_level_error_is_visible_on_the_tagged_response() {
         &server,
         jmap_response(
             vec![
-                inv(
-                    "Mailbox/get",
-                    "s0",
-                    mailbox_get_body(ACCOUNT_ID, "78540"),
-                ),
+                inv("Mailbox/get", "s0", mailbox_get_body(ACCOUNT_ID, "78540")),
                 method_error("s1", "invalidArguments"),
             ],
             SESSION_STATE,
@@ -1223,12 +1200,9 @@ async fn a_malformed_method_error_on_a_set_response_is_never_a_silent_success() 
 
         let mut request = client.build();
         request.set_mailbox().update("mf2").name("Renamed");
-        let err = request
-            .send_set_mailbox()
-            .await
-            .expect_err(&format!(
-                "an error Invocation that {why} must never read as an empty success"
-            ));
+        let err = request.send_set_mailbox().await.expect_err(&format!(
+            "an error Invocation that {why} must never read as an empty success"
+        ));
 
         if is_a_parseable_error {
             let Error::Method(method_err) = err else {
@@ -1321,7 +1295,10 @@ async fn limit_problem_carries_the_limit_name() {
     let Error::Problem(problem) = err else {
         panic!("expected Error::Problem, got {err:?}");
     };
-    assert!(matches!(problem.error(), ProblemType::JMAP(JMAPError::Limit)));
+    assert!(matches!(
+        problem.error(),
+        ProblemType::JMAP(JMAPError::Limit)
+    ));
     assert_eq!(problem.limit(), Some("maxSizeRequest"));
     assert_eq!(problem.status(), Some(400));
 }
@@ -1591,7 +1568,10 @@ async fn bearer_credentials_produce_a_bearer_authorization_header() {
 
     assert_eq!(client.headers()["Authorization"], "Bearer some-api-token");
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[0].headers["Authorization"], "Bearer some-api-token");
+    assert_eq!(
+        requests[0].headers["Authorization"],
+        "Bearer some-api-token"
+    );
 }
 
 #[tokio::test]

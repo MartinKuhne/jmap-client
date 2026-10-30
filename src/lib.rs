@@ -610,7 +610,10 @@ mod tests {
             (URI::Core, "urn:ietf:params:jmap:core"),
             (URI::Mail, "urn:ietf:params:jmap:mail"),
             (URI::Submission, "urn:ietf:params:jmap:submission"),
-            (URI::VacationResponse, "urn:ietf:params:jmap:vacationresponse"),
+            (
+                URI::VacationResponse,
+                "urn:ietf:params:jmap:vacationresponse",
+            ),
             (URI::Contacts, "urn:ietf:params:jmap:contacts"),
             (URI::Calendars, "urn:ietf:params:jmap:calendars"),
             (URI::WebSocket, "urn:ietf:params:jmap:websocket"),
@@ -618,7 +621,10 @@ mod tests {
             (URI::Blob, "urn:ietf:params:jmap:blob"),
             (URI::Quota, "urn:ietf:params:jmap:quota"),
             (URI::Principals, "urn:ietf:params:jmap:principals"),
-            (URI::PrincipalsOwner, "urn:ietf:params:jmap:principals:owner"),
+            (
+                URI::PrincipalsOwner,
+                "urn:ietf:params:jmap:principals:owner",
+            ),
         ];
 
         assert_eq!(cases.len(), 12, "all twelve capability URIs");
@@ -653,7 +659,10 @@ mod tests {
             (DataType::SieveScript, "SieveScript"),
             (DataType::Calendar, "Calendar"),
             (DataType::CalendarEvent, "CalendarEvent"),
-            (DataType::CalendarEventNotification, "CalendarEventNotification"),
+            (
+                DataType::CalendarEventNotification,
+                "CalendarEventNotification",
+            ),
             (DataType::AddressBook, "AddressBook"),
             (DataType::ContactCard, "ContactCard"),
             (DataType::FileNode, "FileNode"),

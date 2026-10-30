@@ -1090,7 +1090,10 @@ mod tests {
     fn property_parse_covers_names_header_arm_and_fallback() {
         assert_eq!(Property::parse("mailboxIds"), Some(Property::MailboxIds));
         assert_eq!(Property::parse("keywords"), Some(Property::Keywords));
-        assert_eq!(Property::parse("bodyStructure"), Some(Property::BodyStructure));
+        assert_eq!(
+            Property::parse("bodyStructure"),
+            Some(Property::BodyStructure)
+        );
         assert_eq!(
             Property::parse("header:Subject:asText"),
             Some(Property::Header(Header::as_text("Subject", false)))
@@ -1164,10 +1167,7 @@ mod tests {
             (Header::as_raw("X-Raw", true), "header:X-Raw:all"),
             (Header::as_text("X-Text", false), "header:X-Text:asText"),
             (Header::as_text("X-Text", true), "header:X-Text:asText:all"),
-            (
-                Header::as_addresses("To", false),
-                "header:To:asAddresses",
-            ),
+            (Header::as_addresses("To", false), "header:To:asAddresses"),
             (
                 Header::as_grouped_addresses("To", true),
                 "header:To:asGroupedAddresses:all",
@@ -1307,7 +1307,10 @@ mod tests {
     #[test]
     fn header_value_forms_survive_a_wire_round_trip() {
         let cases: Vec<(HeaderValue, serde_json::Value)> = vec![
-            (HeaderValue::AsText("Team lunch".into()), json!("Team lunch")),
+            (
+                HeaderValue::AsText("Team lunch".into()),
+                json!("Team lunch"),
+            ),
             (
                 HeaderValue::AsTextAll(vec!["a".into(), "b".into()]),
                 json!(["a", "b"]),

@@ -35,8 +35,8 @@
 mod common;
 
 use common::{
-    connected_client, jmap_response, jmap_response_with_created_ids, mount_jmap, jmap_request_bodies,
-    single_jmap_request, ACCOUNT_ID, SESSION_STATE,
+    connected_client, jmap_request_bodies, jmap_response, jmap_response_with_created_ids,
+    mount_jmap, single_jmap_request, ACCOUNT_ID, SESSION_STATE,
 };
 use jmap_client::core::error::MethodErrorType;
 use jmap_client::core::query::{Comparator, Filter};
@@ -189,7 +189,10 @@ async fn email_submission_get_parses_the_full_rfc_object() {
     mount_one(
         &server,
         "EmailSubmission/get",
-        submission_get_body(vec![rfc_submission("ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0")], vec![]),
+        submission_get_body(
+            vec![rfc_submission("ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0")],
+            vec![],
+        ),
     )
     .await;
 
@@ -257,18 +260,29 @@ async fn email_submission_get_parses_the_full_rfc_object() {
     assert_eq!(bounced.displayed(), &Displayed::Unknown);
 
     // An unknown recipient is simply absent from the map.
-    assert!(submission.delivery_status_email("nobody@example.com").is_none());
+    assert!(submission
+        .delivery_status_email("nobody@example.com")
+        .is_none());
 
     // DSN/MDN blob id lists (§7, "in order of receipt, oldest first").
-    assert_eq!(submission.dsn_blob_ids(), Some(&["Bdsn1".to_string(), "Bdsn2".to_string()][..]));
+    assert_eq!(
+        submission.dsn_blob_ids(),
+        Some(&["Bdsn1".to_string(), "Bdsn2".to_string()][..])
+    );
     assert_eq!(submission.mdn_blob_ids(), Some(&["Bmdn1".to_string()][..]));
 
     // --- what actually went over the wire (RFC 8620 §3.2/§5.1) ---
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "EmailSubmission/get", "method name must be on the wire");
+    assert_eq!(
+        call[0], "EmailSubmission/get",
+        "method name must be on the wire"
+    );
     assert_eq!(call[2], "s0");
     assert_eq!(call[1]["accountId"], ACCOUNT_ID);
-    assert_eq!(call[1]["ids"], json!(["ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0"]));
+    assert_eq!(
+        call[1]["ids"],
+        json!(["ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0"])
+    );
     // No `properties` argument was given, so none may be serialised (§5.1:
     // "if null … the server must return all properties").
     assert!(call[1].get("properties").is_none());
@@ -354,10 +368,7 @@ async fn email_submission_get_pops_the_last_record_when_the_server_returns_sever
         &server,
         "EmailSubmission/get",
         submission_get_body(
-            vec![
-                rfc_submission("ES-first"),
-                rfc_submission("ES-second"),
-            ],
+            vec![rfc_submission("ES-first"), rfc_submission("ES-second")],
             vec![],
         ),
     )
@@ -439,7 +450,10 @@ async fn email_submission_create_round_trips_the_creation_id() {
 
     // --- the request the server actually received (RFC 8621 §7.5.1) ---
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "EmailSubmission/set", "method name must be on the wire");
+    assert_eq!(
+        call[0], "EmailSubmission/set",
+        "method name must be on the wire"
+    );
     assert_eq!(call[1]["accountId"], ACCOUNT_ID);
     assert_eq!(
         call[1]["create"]["c0"],
@@ -592,10 +606,7 @@ async fn email_submission_create_reports_no_recipients() {
         panic!("expected Error::Set, got {err:?}")
     };
     assert_eq!(set_err.type_, SetErrorType::NoRecipients);
-    assert_eq!(
-        set_err.description(),
-        Some("Envelope has no recipients")
-    );
+    assert_eq!(set_err.description(), Some("Envelope has no recipients"));
 }
 
 #[tokio::test]
@@ -720,7 +731,10 @@ async fn email_submission_change_status_cancels_a_pending_submission() {
     assert_eq!(updated.undo_status(), Some(&UndoStatus::Canceled));
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "EmailSubmission/set", "method name must be on the wire");
+    assert_eq!(
+        call[0], "EmailSubmission/set",
+        "method name must be on the wire"
+    );
     assert_eq!(
         call[1]["update"]["ES-1"],
         json!({ "undoStatus": "canceled" }),
@@ -783,7 +797,10 @@ async fn email_submission_destroy_removes_the_record() {
     client.email_submission_destroy("ES-1").await.unwrap();
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "EmailSubmission/set", "method name must be on the wire");
+    assert_eq!(
+        call[0], "EmailSubmission/set",
+        "method name must be on the wire"
+    );
     assert_eq!(call[1]["destroy"], json!(["ES-1"]));
     // §7.5: destroying the record must not touch the deliveries it represents,
     // so no onSuccess* argument may be invented by the client.
@@ -893,7 +910,10 @@ async fn email_submission_query_sends_filter_and_sort_and_returns_ids() {
     assert!(response.can_calculate_changes());
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "EmailSubmission/query", "method name must be on the wire");
+    assert_eq!(
+        call[0], "EmailSubmission/query",
+        "method name must be on the wire"
+    );
     assert_eq!(call[1]["accountId"], ACCOUNT_ID);
     assert_eq!(call[1]["filter"], json!({ "undoStatus": "pending" }));
     assert_eq!(
@@ -962,10 +982,7 @@ async fn email_submission_query_reports_unsupported_sort() {
     let client = connected_client(&server).await;
     mount_jmap(
         &server,
-        jmap_response(
-            vec![method_error("s0", "unsupportedSort")],
-            SESSION_STATE,
-        ),
+        jmap_response(vec![method_error("s0", "unsupportedSort")], SESSION_STATE),
     )
     .await;
 
@@ -1037,10 +1054,7 @@ async fn email_submission_query_changes_round_trips_added_and_removed() {
         query.max_changes(10);
         query.calculate_total(true);
     }
-    let response = request
-        .send_query_email_submission_changes()
-        .await
-        .unwrap();
+    let response = request.send_query_email_submission_changes().await.unwrap();
 
     assert_eq!(response.account_id(), ACCOUNT_ID);
     assert_eq!(response.old_query_state(), "104:0");
@@ -1055,8 +1069,7 @@ async fn email_submission_query_changes_round_trips_added_and_removed() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "EmailSubmission/queryChanges",
+        call[0], "EmailSubmission/queryChanges",
         "method name must be on the wire"
     );
     assert_eq!(call[1]["sinceQueryState"], "104:0");
@@ -1102,8 +1115,7 @@ async fn email_submission_changes_round_trips_every_member() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "EmailSubmission/changes",
+        call[0], "EmailSubmission/changes",
         "method name must be on the wire"
     );
     assert_eq!(call[1]["sinceState"], "104");
@@ -1223,7 +1235,10 @@ async fn email_submission_undo_status_covers_every_rfc_value() {
 
     assert_eq!(response.list()[0].undo_status(), Some(&UndoStatus::Pending));
     assert_eq!(response.list()[1].undo_status(), Some(&UndoStatus::Final));
-    assert_eq!(response.list()[2].undo_status(), Some(&UndoStatus::Canceled));
+    assert_eq!(
+        response.list()[2].undo_status(),
+        Some(&UndoStatus::Canceled)
+    );
     // A record with no envelope at all reports None rather than panicking.
     assert!(response.list()[0].mail_from().is_none());
     assert!(response.list()[0].rcpt_to().is_none());
@@ -1377,8 +1392,7 @@ async fn send_changes_email_submission_sends_the_call_and_parses_the_response() 
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "EmailSubmission/changes",
+        body["methodCalls"][0][0], "EmailSubmission/changes",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][1]["sinceState"], "104");
@@ -1409,7 +1423,10 @@ async fn send_query_email_submission_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(body["methodCalls"][0][0], "EmailSubmission/query");
-    assert_eq!(body["methodCalls"][0][1]["filter"], json!({ "identityIds": ["Id1"] }));
+    assert_eq!(
+        body["methodCalls"][0][1]["filter"],
+        json!({ "identityIds": ["Id1"] })
+    );
     assert_eq!(
         body["methodCalls"][0][1]["sort"],
         json!([{ "property": "sentAt", "isAscending": true }])
@@ -1432,7 +1449,10 @@ async fn send_set_email_submission_sends_the_call_and_parses_the_response() {
 
     assert_eq!(response.account_id(), Some(ACCOUNT_ID));
     let created = response.created("c0").expect("the created submission");
-    assert_eq!(created.id(), Some("ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0"));
+    assert_eq!(
+        created.id(),
+        Some("ES-3bab7f9a-623e-4acf-99a5-2e67facb02a0")
+    );
 
     let body = single_jmap_request(&server).await;
     assert_eq!(body["methodCalls"][0][0], "EmailSubmission/set");

@@ -83,9 +83,7 @@ async fn mount_download(server: &MockServer, blob_id: &str, bytes: &[u8], conten
     Mock::given(method("GET"))
         .and(path(format!("/download/{ACCOUNT_ID}/{blob_id}/none")))
         .and(query_param("accept", "application/octet-stream"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(bytes.to_vec(), content_type),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(bytes.to_vec(), content_type))
         .mount(server)
         .await
 }
@@ -110,7 +108,14 @@ async fn upload_returns_the_blob_metadata_and_puts_the_octets_on_the_wire() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
     let payload = b"require \"fileinto\";\r\nfileinto \"INBOX.target\";\r\n";
-    mount_upload(&server, ACCOUNT_ID, BLOB_ID, "application/sieve", payload.len()).await;
+    mount_upload(
+        &server,
+        ACCOUNT_ID,
+        BLOB_ID,
+        "application/sieve",
+        payload.len(),
+    )
+    .await;
 
     let mut response = client
         .upload(None, payload.to_vec(), Some("application/sieve"))
@@ -191,15 +196,17 @@ async fn an_upload_problem_document_surfaces_as_error_problem() {
     // the content type, so no charset suffix (Findings #7).
     Mock::given(method("POST"))
         .and(path(format!("/upload/{ACCOUNT_ID}")))
-        .respond_with(ResponseTemplate::new(413).set_body_raw(
-            json!({
-                "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.1",
-                "title": "TOO_LARGE",
-                "detail": "Maximum upload size is 50000000 bytes"
-            })
-            .to_string(),
-            "application/problem+json",
-        ))
+        .respond_with(
+            ResponseTemplate::new(413).set_body_raw(
+                json!({
+                    "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.1",
+                    "title": "TOO_LARGE",
+                    "detail": "Maximum upload size is 50000000 bytes"
+                })
+                .to_string(),
+                "application/problem+json",
+            ),
+        )
         .mount(&server)
         .await;
 
@@ -224,10 +231,7 @@ async fn an_upload_error_without_a_problem_content_type_degrades_to_server_error
         .mount(&server)
         .await;
 
-    let err = client
-        .upload(None, vec![0u8; 10], None)
-        .await
-        .unwrap_err();
+    let err = client.upload(None, vec![0u8; 10], None).await.unwrap_err();
     assert!(
         matches!(err, Error::Server(_)),
         "a non-problem error body must degrade to Error::Server, got {err:?}"
@@ -279,15 +283,17 @@ async fn a_download_problem_document_surfaces_as_error_problem() {
     Mock::given(method("GET"))
         .and(path(format!("/download/{ACCOUNT_ID}/missing/none")))
         .and(query_param("accept", "application/octet-stream"))
-        .respond_with(ResponseTemplate::new(404).set_body_raw(
-            json!({
-                "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.2",
-                "title": "NOT_FOUND",
-                "detail": "No such blob"
-            })
-            .to_string(),
-            "application/problem+json",
-        ))
+        .respond_with(
+            ResponseTemplate::new(404).set_body_raw(
+                json!({
+                    "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.2",
+                    "title": "NOT_FOUND",
+                    "detail": "No such blob"
+                })
+                .to_string(),
+                "application/problem+json",
+            ),
+        )
         .mount(&server)
         .await;
 
@@ -356,7 +362,10 @@ async fn blob_copy_reports_a_not_found_blob() {
     )
     .await;
 
-    let err = client.blob_copy(OTHER_ACCOUNT_ID, BLOB_ID).await.unwrap_err();
+    let err = client
+        .blob_copy(OTHER_ACCOUNT_ID, BLOB_ID)
+        .await
+        .unwrap_err();
     let Error::Set(err) = err else {
         panic!("expected a Set error, got {err:?}");
     };
@@ -375,7 +384,10 @@ async fn blob_copy_of_an_unreported_id_is_an_internal_error() {
     )
     .await;
 
-    let err = client.blob_copy(OTHER_ACCOUNT_ID, BLOB_ID).await.unwrap_err();
+    let err = client
+        .blob_copy(OTHER_ACCOUNT_ID, BLOB_ID)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, Error::Internal(_)),
         "an id in neither `copied` nor `notCopied` must be Internal, got {err:?}"
@@ -431,7 +443,10 @@ async fn copy_blob_via_the_request_builder_copies_several_blobs() {
         ]
     );
 
-    assert_eq!(response.not_copied_ids().unwrap().collect::<Vec<_>>(), ["BlobC"]);
+    assert_eq!(
+        response.not_copied_ids().unwrap().collect::<Vec<_>>(),
+        ["BlobC"]
+    );
     assert_eq!(
         response.not_copied_reason("BlobC").unwrap().error(),
         &SetErrorType::NotFound
@@ -454,7 +469,10 @@ async fn a_method_level_error_short_circuits_the_copy() {
     )
     .await;
 
-    let err = client.blob_copy(OTHER_ACCOUNT_ID, BLOB_ID).await.unwrap_err();
+    let err = client
+        .blob_copy(OTHER_ACCOUNT_ID, BLOB_ID)
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, Error::Method(_)),
         "an `error` Invocation must surface as Error::Method, got {err:?}"

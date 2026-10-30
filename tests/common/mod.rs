@@ -217,10 +217,7 @@ fn build_session(base_url: &str, sieve: bool) -> Value {
         "urn:ietf:params:jmap:submission".into(),
         submission_capability(),
     );
-    capabilities.insert(
-        "urn:ietf:params:jmap:vacationresponse".into(),
-        json!({}),
-    );
+    capabilities.insert("urn:ietf:params:jmap:vacationresponse".into(), json!({}));
     capabilities.insert(
         "urn:ietf:params:jmap:websocket".into(),
         websocket_capability(base_url),
@@ -300,11 +297,7 @@ pub async fn mount_session(server: &MockServer) {
 
 /// Mounts an arbitrary Session resource on `GET /.well-known/jmap`.
 pub async fn mount_session_json(server: &MockServer, session: Value) {
-    mount_session_template(
-        server,
-        ResponseTemplate::new(200).set_body_json(session),
-    )
-    .await
+    mount_session_template(server, ResponseTemplate::new(200).set_body_json(session)).await
 }
 
 /// Mounts an arbitrary response template on `GET /.well-known/jmap`.

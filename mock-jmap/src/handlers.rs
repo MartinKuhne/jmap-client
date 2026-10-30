@@ -149,7 +149,7 @@ pub fn changes_response(
     };
     let (created, updated, destroyed) = match coll.changes_since(&since) {
         Ok(changes) => changes,
-        Err(()) => return CallOutcome::error(CANNOT_CALCULATE_CHANGES),
+        Err(_) => return CallOutcome::error(CANNOT_CALCULATE_CHANGES),
     };
     let mut out = json!({
         "accountId": account_id,
@@ -506,7 +506,11 @@ fn email_copy(ctx: Ctx) -> CallOutcome {
             }
             let thread_id = ctx.store.threads.create(json!({ "emailIds": [] }));
             let email_id = ctx.store.emails.create(copy);
-            link_thread(&mut ctx.store.threads, &thread_id, std::slice::from_ref(&email_id));
+            link_thread(
+                &mut ctx.store.threads,
+                &thread_id,
+                std::slice::from_ref(&email_id),
+            );
             created.insert(
                 creation_id.clone(),
                 ctx.store
@@ -588,7 +592,11 @@ fn email_import(ctx: Ctx) -> CallOutcome {
                 "preview": format!("{subject} (imported)"),
             });
             let email_id = ctx.store.emails.create(record);
-            link_thread(&mut ctx.store.threads, &thread_id, std::slice::from_ref(&email_id));
+            link_thread(
+                &mut ctx.store.threads,
+                &thread_id,
+                std::slice::from_ref(&email_id),
+            );
             created.insert(
                 creation_id.clone(),
                 ctx.store

@@ -178,10 +178,7 @@ async fn thread_get_method_error_is_propagated() {
     let client = connected_client(&server).await;
     mount_jmap(
         &server,
-        jmap_response(
-            vec![method_error("s0", "unknownMethod")],
-            SESSION_STATE,
-        ),
+        jmap_response(vec![method_error("s0", "unknownMethod")], SESSION_STATE),
     )
     .await;
 
@@ -365,10 +362,7 @@ fn thread_property_display_and_serde_agree() {
     assert_eq!(Property::Id.to_string(), "id");
     assert_eq!(Property::EmailIds.to_string(), "emailIds");
 
-    for (name, property) in [
-        ("id", Property::Id),
-        ("emailIds", Property::EmailIds),
-    ] {
+    for (name, property) in [("id", Property::Id), ("emailIds", Property::EmailIds)] {
         let encoded = serde_json::to_string(&property).unwrap();
         assert_eq!(encoded, format!("\"{name}\""));
         let decoded: Property = serde_json::from_str(&encoded).unwrap();

@@ -31,7 +31,9 @@ use jmap_client::core::error::MethodErrorType;
 use jmap_client::core::query::Filter;
 use jmap_client::core::query::QueryResponse;
 use jmap_client::core::query_changes::QueryChangesResponse;
-use jmap_client::core::response::{EmailChangesResponse, MailboxChangesResponse, ThreadChangesResponse};
+use jmap_client::core::response::{
+    EmailChangesResponse, MailboxChangesResponse, ThreadChangesResponse,
+};
 use jmap_client::email::query::{Comparator as EmailComparator, Filter as EmailFilter};
 use jmap_client::mailbox::query::{Comparator as MailboxComparator, Filter as MailboxFilter};
 use jmap_client::mailbox::Property;
@@ -191,19 +193,28 @@ fn query_changes_body(
 // request body is never empty (Findings #31).
 // ---------------------------------------------------------------------------
 
-async fn mailbox_changes(client: &Client, since_state: &str) -> jmap_client::Result<MailboxChangesResponse> {
+async fn mailbox_changes(
+    client: &Client,
+    since_state: &str,
+) -> jmap_client::Result<MailboxChangesResponse> {
     let mut request = client.build();
     request.changes_mailbox(since_state);
     request.send_changes_mailbox().await
 }
 
-async fn email_changes(client: &Client, since_state: &str) -> jmap_client::Result<EmailChangesResponse> {
+async fn email_changes(
+    client: &Client,
+    since_state: &str,
+) -> jmap_client::Result<EmailChangesResponse> {
     let mut request = client.build();
     request.changes_email(since_state);
     request.send_changes_email().await
 }
 
-async fn thread_changes(client: &Client, since_state: &str) -> jmap_client::Result<ThreadChangesResponse> {
+async fn thread_changes(
+    client: &Client,
+    since_state: &str,
+) -> jmap_client::Result<ThreadChangesResponse> {
     let mut request = client.build();
     request.changes_thread(since_state);
     request.send_changes_thread().await
@@ -269,8 +280,14 @@ async fn mailbox_changes_round_trip_parses_every_member() {
     // The `take_*` accessors move the values out, leaving empties behind.
     assert_eq!(response.take_account_id(), ACCOUNT_ID);
     assert_eq!(response.take_new_state(), "78542");
-    assert_eq!(response.take_created(), vec!["MBdfe8ab4d4e0c4f0".to_string()]);
-    assert_eq!(response.take_updated(), vec!["MB23cfa8094c0f41e6".to_string()]);
+    assert_eq!(
+        response.take_created(),
+        vec!["MBdfe8ab4d4e0c4f0".to_string()]
+    );
+    assert_eq!(
+        response.take_updated(),
+        vec!["MB23cfa8094c0f41e6".to_string()]
+    );
     assert_eq!(
         response.take_destroyed(),
         vec!["MB674cc24095db49ce".to_string()]
@@ -280,7 +297,10 @@ async fn mailbox_changes_round_trip_parses_every_member() {
 
     // --- what actually went over the wire (RFC 8620 §3.2/§5.2) ---
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "Mailbox/changes", "method name must be on the wire");
+    assert_eq!(
+        call[0], "Mailbox/changes",
+        "method name must be on the wire"
+    );
     assert_eq!(call[2], "s0");
     assert_eq!(call[1]["accountId"], ACCOUNT_ID);
     assert_eq!(call[1]["sinceState"], "78541");
@@ -498,7 +518,15 @@ async fn changes_pages_through_intermediate_states_until_has_more_changes_is_fal
             vec![inv(
                 "Mailbox/changes",
                 "s0",
-                changes_body(ACCOUNT_ID, "B", "B-D-E", true, &[], &["MB23cfa8094c0f41e6"], &[]),
+                changes_body(
+                    ACCOUNT_ID,
+                    "B",
+                    "B-D-E",
+                    true,
+                    &[],
+                    &["MB23cfa8094c0f41e6"],
+                    &[],
+                ),
             )],
             SESSION_STATE,
         ),
@@ -525,7 +553,15 @@ async fn changes_pages_through_intermediate_states_until_has_more_changes_is_fal
             vec![inv(
                 "Mailbox/changes",
                 "s0",
-                changes_body(ACCOUNT_ID, "B-D-E", "E", false, &[], &[], &["MB674cc24095db49ce"]),
+                changes_body(
+                    ACCOUNT_ID,
+                    "B-D-E",
+                    "E",
+                    false,
+                    &[],
+                    &[],
+                    &["MB674cc24095db49ce"],
+                ),
             )],
             SESSION_STATE,
         ),
@@ -560,7 +596,9 @@ async fn changes_cannot_calculate_changes_maps_to_error_method() {
     )
     .await;
 
-    let err = mailbox_changes(&client, "very-old-state").await.unwrap_err();
+    let err = mailbox_changes(&client, "very-old-state")
+        .await
+        .unwrap_err();
     let Error::Method(method_err) = err else {
         panic!("expected Error::Method, got {err:?}");
     };
@@ -849,7 +887,14 @@ async fn can_calculate_changes_false_is_surfaced_and_absent_means_false() {
             vec![inv(
                 "Mailbox/query",
                 "s0",
-                query_body(ACCOUNT_ID, "mutable-sort-state", json!(false), 0, Value::Null, &[]),
+                query_body(
+                    ACCOUNT_ID,
+                    "mutable-sort-state",
+                    json!(false),
+                    0,
+                    Value::Null,
+                    &[],
+                ),
             )],
             SESSION_STATE,
         ),
@@ -943,7 +988,10 @@ async fn mailbox_query_changes_round_trip() {
 
     // --- wire assertions (RFC 8620 §5.6 request arguments) ---
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "Mailbox/queryChanges", "method name must be on the wire");
+    assert_eq!(
+        call[0], "Mailbox/queryChanges",
+        "method name must be on the wire"
+    );
     assert_eq!(call[2], "s0");
     assert_eq!(call[1]["accountId"], ACCOUNT_ID);
     assert_eq!(call[1]["sinceQueryState"], "09aa9a075588-78540:0");
@@ -1190,12 +1238,18 @@ async fn doc_example_changes_to_get_chain_wires_result_references() {
     assert!(!get.is_error());
 
     // The changes half is usable as a sync step.
-    let changes = response.method_response_by_pos(0).unwrap_changes_mailbox().unwrap();
+    let changes = response
+        .method_response_by_pos(0)
+        .unwrap_changes_mailbox()
+        .unwrap();
     assert_eq!(changes.new_state(), "78542");
     assert_eq!(changes.updated(), ["MB23cfa8094c0f41e6"]);
 
     // The get half carries only the referenced count properties.
-    let mut get = response.method_response_by_pos(0).unwrap_get_mailbox().unwrap();
+    let mut get = response
+        .method_response_by_pos(0)
+        .unwrap_get_mailbox()
+        .unwrap();
     let mailbox = get.take_list().pop().unwrap();
     assert_eq!(mailbox.id(), Some("MB23cfa8094c0f41e6"));
     assert_eq!(mailbox.total_emails(), 16307);
@@ -1453,7 +1507,15 @@ async fn a_query_error_in_a_chained_request_does_not_disturb_the_other_response(
                 inv(
                     "Mailbox/changes",
                     "s0",
-                    changes_body(ACCOUNT_ID, "78541", "78542", false, &[], &["MB23cfa8094c0f41e6"], &[]),
+                    changes_body(
+                        ACCOUNT_ID,
+                        "78541",
+                        "78542",
+                        false,
+                        &[],
+                        &["MB23cfa8094c0f41e6"],
+                        &[],
+                    ),
                 ),
                 method_error("s1", "cannotCalculateChanges"),
             ],

@@ -14,6 +14,13 @@ use serde_json::{json, Map, Value};
 
 use crate::session::ACCOUNT_ID;
 
+/// The three disjoint id lists returned by a collection changes query.
+pub type ChangeLists = (Vec<String>, Vec<String>, Vec<String>);
+
+/// The requested state is malformed or is ahead of the collection's current state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownState;
+
 /// One state transition of a collection.
 #[derive(Debug, Clone)]
 struct HistoryEntry {
@@ -152,15 +159,12 @@ impl Collection {
 
     /// The changes since `since_state`.
     ///
-    /// `Err(())` means the state is unknown to the mock (unparseable or ahead of
+    /// `Err(UnknownState)` means the state is unknown to the mock (unparseable or ahead of
     /// the current state), which callers turn into `cannotCalculateChanges`.
-    pub fn changes_since(
-        &self,
-        since_state: &str,
-    ) -> Result<(Vec<String>, Vec<String>, Vec<String>), ()> {
-        let since = since_state.parse::<u64>().map_err(|_| ())?;
+    pub fn changes_since(&self, since_state: &str) -> Result<ChangeLists, UnknownState> {
+        let since = since_state.parse::<u64>().map_err(|_| UnknownState)?;
         if since > self.state {
-            return Err(());
+            return Err(UnknownState);
         }
         let mut created = Vec::new();
         let mut updated = Vec::new();
@@ -671,6 +675,7 @@ impl Default for Store {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Fixture fields intentionally mirror the Mailbox record.
 fn mailbox(
     id: &str,
     name: &str,
@@ -719,6 +724,7 @@ fn mailbox(
     Value::Object(obj)
 }
 
+#[allow(clippy::too_many_arguments)] // Fixture fields intentionally mirror the Email record.
 fn email(
     id: &str,
     blob_id: &str,

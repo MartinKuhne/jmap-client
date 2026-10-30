@@ -35,19 +35,19 @@ use futures_util::{
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::broadcast;
+use tokio_tungstenite::accept_hdr_async;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as WsRequest, Response as WsResponse,
 };
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-use tokio_tungstenite::accept_hdr_async;
 
 use crate::dispatch::{self, RequestProblem};
 use crate::http::{self, HttpRequest, PrefixedStream, RawRequest};
+use crate::problem::problem_response;
 use crate::problem::problem_type::{
     MISSING_SUBPROTOCOL, NOT_JSON, NOT_REQUEST, NOT_WEBSOCKET_UPGRADE, UNAUTHORIZED,
 };
-use crate::problem::problem_response;
 use crate::push::{Changed, PushBus, PushEvent};
 use crate::Shared;
 
@@ -118,7 +118,11 @@ pub async fn serve(shared: Arc<Mutex<Shared>>, stream: TcpStream, raw: RawReques
         return;
     };
 
-    let bus = shared.lock().expect("mock-jmap: shared state poisoned").push.clone();
+    let bus = shared
+        .lock()
+        .expect("mock-jmap: shared state poisoned")
+        .push
+        .clone();
     // Live events only; anything older comes from history when the client
     // enables push with a `pushState` token.
     let mut receiver = bus.subscribe(None).0;
@@ -174,14 +178,16 @@ pub async fn serve(shared: Arc<Mutex<Shared>>, stream: TcpStream, raw: RawReques
 
 /// Adds the `jmap` subprotocol the client asked for (§4.2: the reply "MUST also
 /// contain a corresponding `Sec-WebSocket-Protocol` header field").
+#[allow(clippy::result_large_err)] // Required by tokio-tungstenite's handshake callback signature.
 fn echo_subprotocol(
     _request: &WsRequest,
     response: WsResponse,
 ) -> Result<WsResponse, ErrorResponse> {
     let mut response = response;
-    response
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", HeaderValue::from_static(SUBPROTOCOL));
+    response.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        HeaderValue::from_static(SUBPROTOCOL),
+    );
     Ok(response)
 }
 
@@ -191,12 +197,16 @@ fn echo_subprotocol(
 /// The accept loop asks this before routing, because an upgrade is not a request
 /// that gets a response: the socket changes hands.
 pub fn is_upgrade(request: &HttpRequest) -> bool {
-    let upgrades = request
-        .header("upgrade")
-        .is_some_and(|value| value.split(',').any(|item| item.trim().eq_ignore_ascii_case("websocket")));
-    let keeps = request
-        .header("connection")
-        .is_some_and(|value| value.split(',').any(|item| item.trim().eq_ignore_ascii_case("upgrade")));
+    let upgrades = request.header("upgrade").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|item| item.trim().eq_ignore_ascii_case("websocket"))
+    });
+    let keeps = request.header("connection").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|item| item.trim().eq_ignore_ascii_case("upgrade"))
+    });
     upgrades && keeps
 }
 
@@ -340,16 +350,13 @@ where
                 )),
             )
             .to_ws_frame();
-            frame
-                .as_object_mut()
-                .expect("frame is an object")
-                .insert(
-                    "requestId".to_string(),
-                    root.get("id")
-                        .and_then(Value::as_str)
-                        .map(Value::from)
-                        .unwrap_or(Value::Null),
-                );
+            frame.as_object_mut().expect("frame is an object").insert(
+                "requestId".to_string(),
+                root.get("id")
+                    .and_then(Value::as_str)
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
             sink.send(Message::text(frame.to_string())).await
         }
         None => {
@@ -359,7 +366,8 @@ where
                 "WebSocket frame has no \"@type\" member",
                 None,
             );
-            sink.send(Message::text(frame.to_ws_frame().to_string())).await
+            sink.send(Message::text(frame.to_ws_frame().to_string()))
+                .await
         }
     }
 }
@@ -392,13 +400,10 @@ where
         }
         Err(problem) => problem.to_ws_frame(),
     };
-    frame
-        .as_object_mut()
-        .expect("frame is an object")
-        .insert(
-            "requestId".to_string(),
-            request_id.map(Value::from).unwrap_or(Value::Null),
-        );
+    frame.as_object_mut().expect("frame is an object").insert(
+        "requestId".to_string(),
+        request_id.map(Value::from).unwrap_or(Value::Null),
+    );
 
     sink.send(Message::text(frame.to_string())).await
 }

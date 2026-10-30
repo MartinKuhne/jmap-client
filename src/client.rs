@@ -563,8 +563,8 @@ impl From<(String, String)> for Credentials {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::response::{Response, TaggedMethodResponse};
     use super::*;
+    use crate::core::response::{Response, TaggedMethodResponse};
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -676,8 +676,16 @@ mod tests {
     /// through the builder, and the last call wins.
     #[test]
     fn accept_invalid_certs_sets_the_flag() {
-        assert!(Client::new().accept_invalid_certs(true).accept_invalid_certs);
-        assert!(!Client::new().accept_invalid_certs(false).accept_invalid_certs);
+        assert!(
+            Client::new()
+                .accept_invalid_certs(true)
+                .accept_invalid_certs
+        );
+        assert!(
+            !Client::new()
+                .accept_invalid_certs(false)
+                .accept_invalid_certs
+        );
         assert!(
             !Client::new()
                 .accept_invalid_certs(true)
@@ -718,7 +726,10 @@ mod tests {
         assert_eq!(builder.forwarded_for.as_deref(), Some("for=192.0.2.1"));
 
         let builder = Client::new().forwarded_for(IpAddr::V6("2001:db8::1".parse().unwrap()));
-        assert_eq!(builder.forwarded_for.as_deref(), Some("for=\"2001:db8::1\""));
+        assert_eq!(
+            builder.forwarded_for.as_deref(),
+            Some("for=\"2001:db8::1\"")
+        );
 
         let builder = Client::new().forwarded_for(IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(builder.forwarded_for.as_deref(), Some("for=\"::1\""));

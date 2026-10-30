@@ -208,18 +208,15 @@ pub async fn read_request_raw(stream: &mut TcpStream) -> io::Result<Option<RawRe
             continue;
         }
         if let Some((name, value)) = line.split_once(':') {
-            headers.push((
-                name.trim().to_ascii_lowercase(),
-                value.trim().to_string(),
-            ));
+            headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
         }
     }
 
     let mut body = buf[head_end + 4..].to_vec();
 
-    let chunked = headers
-        .iter()
-        .any(|(name, value)| name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked"));
+    let chunked = headers.iter().any(|(name, value)| {
+        name == "transfer-encoding" && value.to_ascii_lowercase().contains("chunked")
+    });
 
     if chunked {
         read_chunked_body(stream, &mut body).await?;
@@ -425,10 +422,7 @@ pub fn parse_query(query: &str) -> Vec<(String, String)> {
         .filter(|pair| !pair.is_empty())
         .map(|pair| {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-            (
-                percent_decode(key),
-                percent_decode(value),
-            )
+            (percent_decode(key), percent_decode(value))
         })
         .collect()
 }
@@ -450,7 +444,8 @@ pub fn percent_decode(input: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+    String::from_utf8(out)
+        .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
 }
 
 /// Replays a buffer of already-read bytes, then delegates to the wrapped socket.
@@ -612,7 +607,10 @@ mod tests {
         );
 
         let written = String::from_utf8(sink.writes[0].clone()).expect("utf-8");
-        assert!(written.starts_with("HTTP/1.1 400 Bad Request\r\n"), "{written}");
+        assert!(
+            written.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            "{written}"
+        );
         assert!(
             written.contains("missingSubprotocol"),
             "the one write carries the body too: {written}"

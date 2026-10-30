@@ -123,9 +123,7 @@ async fn search_snippet_get_returns_the_rfc_8621_example() {
     assert_eq!(hit.subject(), Some("The <mark>Foo</mark>sball competition"));
     assert_eq!(
         hit.preview(),
-        Some(
-            "...year the <mark>foo</mark>sball competition will be held in the Stadium de ..."
-        )
+        Some("...year the <mark>foo</mark>sball competition will be held in the Stadium de ...")
     );
 
     // A record whose subject and preview are both null is still a snippet.
@@ -364,7 +362,7 @@ async fn search_snippet_can_reference_the_query_that_produced_the_ids() {
                             }
                         ],
                         "notFound": null
-                    })
+                    }),
                 ),
             ],
             SESSION_STATE,
@@ -431,11 +429,7 @@ async fn send_single_reads_the_response_that_answers_the_request_call() {
                         "total": 1
                     }),
                 ),
-                inv(
-                    "SearchSnippet/get",
-                    "s1",
-                    rfc_snippet_get_body()
-                ),
+                inv("SearchSnippet/get", "s1", rfc_snippet_get_body()),
             ],
             SESSION_STATE,
         ),
@@ -443,8 +437,12 @@ async fn send_single_reads_the_response_that_answers_the_request_call() {
     .await;
 
     let mut request = client.build();
-    request.query_email().filter(email_query::Filter::text("foo"));
-    request.get_search_snippet().email_id("M44200ec123de277c0c1ce69c");
+    request
+        .query_email()
+        .filter(email_query::Filter::text("foo"));
+    request
+        .get_search_snippet()
+        .email_id("M44200ec123de277c0c1ce69c");
 
     // `send_single` deserialises only the response that answers the call it is
     // asking for — here `s1`, the `SearchSnippet/get` — so the leading

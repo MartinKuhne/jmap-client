@@ -84,7 +84,10 @@ impl SseReader {
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .expect("connect to mock");
-        stream.write_all(raw.as_bytes()).await.expect("write request");
+        stream
+            .write_all(raw.as_bytes())
+            .await
+            .expect("write request");
         stream.flush().await.expect("flush request");
 
         let mut reader = SseReader {
@@ -117,10 +120,7 @@ impl SseReader {
                     .and_then(|value| value.parse::<u16>().ok())
                     .expect("status line");
             } else if let Some((name, value)) = line.split_once(':') {
-                headers.push((
-                    name.trim().to_ascii_lowercase(),
-                    value.trim().to_string(),
-                ));
+                headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
             }
         }
     }
@@ -217,7 +217,9 @@ impl SseReader {
 
     /// Asserts the stream stays silent for `window`.
     async fn expect_silence(&mut self, window: Duration) {
-        if let Ok(got) = tokio::time::timeout(window, self.next()).await { panic!("expected silence, got {got:?}") }
+        if let Ok(got) = tokio::time::timeout(window, self.next()).await {
+            panic!("expected silence, got {got:?}")
+        }
     }
 
     /// Asserts the stream ends (terminating chunk or EOF).
@@ -261,7 +263,8 @@ async fn open_stream(server: &MockJmapServer, query: &str) -> SseReader {
     if let Some(id) = LAST_EVENT_ID.with(|value| value.lock().unwrap().take()) {
         headers.push(("Last-Event-ID", id));
     }
-    let mut reader = SseReader::open(server.port(), &format!("/eventSource{query}"), &headers).await;
+    let mut reader =
+        SseReader::open(server.port(), &format!("/eventSource{query}"), &headers).await;
     wait_for_subscribers(server.handle(), 1).await;
     // The liveness comment is the first thing on the wire.
     let first = tokio::time::timeout(WAIT, reader.read_chunk())
@@ -324,9 +327,10 @@ async fn try_connect(
         .into_client_request()
         .expect("a ws:// url becomes an upgrade request");
     if let Some(auth) = auth {
-        request
-            .headers_mut()
-            .insert("Authorization", HeaderValue::from_str(auth).expect("header value"));
+        request.headers_mut().insert(
+            "Authorization",
+            HeaderValue::from_str(auth).expect("header value"),
+        );
     }
     if let Some(subprotocol) = subprotocol {
         request.headers_mut().insert(
@@ -430,7 +434,9 @@ async fn recv_text(ws: &mut WsConn) -> String {
 }
 
 async fn expect_no_frame(ws: &mut WsConn) {
-    if let Ok(got) = tokio::time::timeout(QUIET, ws.next()).await { panic!("expected no frame, got {got:?}") }
+    if let Ok(got) = tokio::time::timeout(QUIET, ws.next()).await {
+        panic!("expected no frame, got {got:?}")
+    }
 }
 
 fn request_frame(id: &str, using: &[&str], calls: Vec<Value>) -> Value {
@@ -561,12 +567,16 @@ async fn eventsource_mutate_from_elsewhere_reaches_the_stream() {
     let server = MockJmapServer::start();
     let mut reader = open_stream(&server, "?types=Mailbox&ping=30").await;
 
-    let state = server.handle().with_store(|store| store.mailboxes.state_str());
+    let state = server
+        .handle()
+        .with_store(|store| store.mailboxes.state_str());
     let pushed = server.handle().mutate_from_elsewhere(|store| {
         // What a `Mailbox/set` handler does: change the record, then record the
         // transition so the collection's state moves.
         let id = store.mailboxes.create(json!({ "name": "From elsewhere" }));
-        store.mailboxes.record_change(vec![id], Vec::new(), Vec::new());
+        store
+            .mailboxes
+            .record_change(vec![id], Vec::new(), Vec::new());
         vec!["Mailbox".to_string()]
     });
 
@@ -582,7 +592,9 @@ async fn eventsource_mutate_from_elsewhere_reaches_the_stream() {
     );
     assert_eq!(
         new_state,
-        server.handle().with_store(|store| store.mailboxes.state_str()),
+        server
+            .handle()
+            .with_store(|store| store.mailboxes.state_str()),
         "and it must match the store exactly"
     );
     assert!(pushed > 0);
@@ -897,7 +909,10 @@ async fn websocket_shares_the_http_dispatchers_semantics() {
     assert_eq!(frame["@type"], json!("Response"));
     let created = frame["createdIds"]["newbox"].as_str().expect("createdIds");
     assert!(!created.is_empty());
-    assert_eq!(frame["methodResponses"][1][1]["list"][0]["id"], json!(created));
+    assert_eq!(
+        frame["methodResponses"][1][1]["list"][0]["id"],
+        json!(created)
+    );
 }
 
 #[tokio::test]
@@ -968,7 +983,10 @@ async fn websocket_unknown_message_type_is_a_request_error_frame() {
 
     let frame = send_and_recv(&mut ws, json!({ "@type": "Nonsense", "id": "R9" })).await;
     assert_eq!(frame["@type"], json!("RequestError"));
-    assert_eq!(frame["type"], json!("urn:ietf:params:jmap:error:notRequest"));
+    assert_eq!(
+        frame["type"],
+        json!("urn:ietf:params:jmap:error:notRequest")
+    );
     assert_eq!(frame["requestId"], json!("R9"));
 }
 
@@ -979,7 +997,10 @@ async fn websocket_a_frame_without_a_type_is_a_request_error_frame() {
 
     let frame = send_and_recv(&mut ws, json!({ "using": [CORE], "methodCalls": [] })).await;
     assert_eq!(frame["@type"], json!("RequestError"));
-    assert_eq!(frame["type"], json!("urn:ietf:params:jmap:error:notRequest"));
+    assert_eq!(
+        frame["type"],
+        json!("urn:ietf:params:jmap:error:notRequest")
+    );
 }
 
 #[tokio::test]
@@ -1168,7 +1189,10 @@ async fn websocket_email_push_frame() {
     wait_for_subscribers(server.handle(), 1).await;
 
     enable_push(&mut ws, Value::Null, None).await;
-    server.handle().push_email_of("em_1").expect("fixture email exists");
+    server
+        .handle()
+        .push_email_of("em_1")
+        .expect("fixture email exists");
 
     let frame = recv_json(&mut ws).await;
     assert_eq!(frame["@type"], json!("EmailPush"));
@@ -1185,14 +1209,16 @@ async fn websocket_ping_gets_an_auto_pong() {
     let server = MockJmapServer::start();
     let mut ws = ws_connect(&server).await;
 
-    tokio::time::timeout(WAIT, ws.send(Message::Ping(b"are you there".to_vec().into())))
-        .await
-        .expect("send ping")
-        .expect("ping sent");
+    tokio::time::timeout(
+        WAIT,
+        ws.send(Message::Ping(b"are you there".to_vec().into())),
+    )
+    .await
+    .expect("send ping")
+    .expect("ping sent");
 
     match tokio::time::timeout(WAIT, ws.next()).await {
-        Ok(Some(Ok(Message::Pong(payload)))
-        ) => {
+        Ok(Some(Ok(Message::Pong(payload)))) => {
             assert_eq!(payload, b"are you there".to_vec());
         }
         Ok(Some(Ok(other))) => panic!("expected a Pong, got {other:?}"),

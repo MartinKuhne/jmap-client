@@ -159,7 +159,9 @@ fn push_notification(message: WebSocketMessage) -> WebSocketPushObject {
 }
 
 /// Pulls the `changed` map out of a `StateChange` notification.
-fn state_change(message: WebSocketMessage) -> ahash::AHashMap<String, ahash::AHashMap<DataType, String>> {
+fn state_change(
+    message: WebSocketMessage,
+) -> ahash::AHashMap<String, ahash::AHashMap<DataType, String>> {
     match push_notification(message).push {
         PushObject::StateChange { changed } => changed,
         other => panic!("expected a StateChange push, got {other:?}"),
@@ -262,10 +264,7 @@ async fn two_sequential_requests_get_distinct_correctly_correlated_ids() {
     let second_response = recv(&mut stream).await;
 
     match (first_response, second_response) {
-        (
-            WebSocketMessage::Response(one),
-            WebSocketMessage::Response(two),
-        ) => {
+        (WebSocketMessage::Response(one), WebSocketMessage::Response(two)) => {
             assert_eq!(one.request_id(), Some(first_id.as_str()));
             assert_eq!(two.request_id(), Some(second_id.as_str()));
             assert!(

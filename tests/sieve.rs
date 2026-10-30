@@ -23,8 +23,8 @@
 mod common;
 
 use common::{
-    connected_client_json, jmap_response, mount_jmap, session_json_with_sieve,
-    single_jmap_request, ACCOUNT_ID, SESSION_STATE,
+    connected_client_json, jmap_response, mount_jmap, session_json_with_sieve, single_jmap_request,
+    ACCOUNT_ID, SESSION_STATE,
 };
 use jmap_client::core::query::{Comparator, Filter};
 use jmap_client::core::set::SetErrorType;
@@ -151,9 +151,7 @@ async fn uploads(server: &MockServer) -> Vec<Vec<u8>> {
         .await
         .unwrap()
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}")
-        })
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}"))
         .map(|r| r.body.clone())
         .collect()
 }
@@ -165,9 +163,7 @@ async fn upload_content_types(server: &MockServer) -> Vec<String> {
         .await
         .unwrap()
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}")
-        })
+        .filter(|r| r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}"))
         .map(|r| {
             r.headers
                 .get("Content-Type")
@@ -216,7 +212,12 @@ async fn sieve_script_get_returns_the_draft_example_record() {
 async fn sieve_script_get_sends_only_the_requested_properties() {
     let server = MockServer::start().await;
     let client = sieve_client(&server).await;
-    mount_one(&server, "SieveScript/get", sieve_get_body(vec![], vec!["nope"])).await;
+    mount_one(
+        &server,
+        "SieveScript/get",
+        sieve_get_body(vec![], vec!["nope"]),
+    )
+    .await;
 
     let missing = client
         .sieve_script_get("nope", Some([Property::Id, Property::IsActive]))
@@ -396,15 +397,17 @@ async fn sieve_script_create_fails_when_the_upload_is_rejected() {
     // content type is byte-compared (Findings #7) — no charset suffix.
     Mock::given(method("POST"))
         .and(path(format!("/upload/{ACCOUNT_ID}")))
-        .respond_with(ResponseTemplate::new(413).set_body_raw(
-            json!({
-                "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.1",
-                "title": "TOO_LARGE",
-                "detail": "Maximum upload size is 50000000 bytes"
-            })
-            .to_string(),
-            "application/problem+json",
-        ))
+        .respond_with(
+            ResponseTemplate::new(413).set_body_raw(
+                json!({
+                    "type": "https://www.rfc-editor.org/rfc/rfc8620#section-6.1",
+                    "title": "TOO_LARGE",
+                    "detail": "Maximum upload size is 50000000 bytes"
+                })
+                .to_string(),
+                "application/problem+json",
+            ),
+        )
         .mount(&server)
         .await;
 
@@ -468,7 +471,10 @@ async fn sieve_script_create_reports_already_exists() {
     assert_eq!(err.properties().unwrap(), ["name"]);
     // The compliant `existingId` member is accepted by the parser but not
     // surfaced by the client (no accessor exists for it in `src/`).
-    assert_eq!(err.description(), Some("A script with that name already exists"));
+    assert_eq!(
+        err.description(),
+        Some("A script with that name already exists")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -488,7 +494,11 @@ async fn sieve_script_replace_uploads_a_new_blob_and_reactivates_by_real_id() {
     .await;
 
     let script = client
-        .sieve_script_replace(SCRIPT_ID, b"redirect \"me@example.org\"\r\n;".to_vec(), true)
+        .sieve_script_replace(
+            SCRIPT_ID,
+            b"redirect \"me@example.org\"\r\n;".to_vec(),
+            true,
+        )
         .await
         .unwrap()
         .expect("the updated record must come back");
@@ -809,12 +819,7 @@ fn query_body(ids: Vec<&str>, total: usize) -> Value {
 async fn sieve_script_query_sends_filter_and_sort() {
     let server = MockServer::start().await;
     let client = sieve_client(&server).await;
-    mount_one(
-        &server,
-        "SieveScript/query",
-        query_body(vec![SCRIPT_ID], 1),
-    )
-    .await;
+    mount_one(&server, "SieveScript/query", query_body(vec![SCRIPT_ID], 1)).await;
 
     let filter: Filter<sieve_query::Filter> = Filter::and([
         Filter::from(sieve_query::Filter::name("test")),
@@ -995,8 +1000,7 @@ async fn send_get_sieve_script_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "SieveScript/get",
+        body["methodCalls"][0][0], "SieveScript/get",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");
@@ -1020,7 +1024,10 @@ async fn send_set_sieve_script_sends_the_call_and_parses_the_response() {
 
     assert_eq!(response.account_id(), Some(ACCOUNT_ID));
     assert_eq!(response.new_state(), "1603742967.852315428-4096");
-    let script = response.updated(SCRIPT_ID).unwrap().expect("updated record");
+    let script = response
+        .updated(SCRIPT_ID)
+        .unwrap()
+        .expect("updated record");
     assert_eq!(script.name(), Some("renamed"));
 
     let body = single_jmap_request(&server).await;
@@ -1094,12 +1101,7 @@ async fn send_validate_sieve_script_surfaces_an_invalid_script_as_a_set_error() 
 async fn send_query_sieve_script_sends_the_call_and_parses_the_response() {
     let server = MockServer::start().await;
     let client = sieve_client(&server).await;
-    mount_one(
-        &server,
-        "SieveScript/query",
-        query_body(vec![SCRIPT_ID], 1),
-    )
-    .await;
+    mount_one(&server, "SieveScript/query", query_body(vec![SCRIPT_ID], 1)).await;
 
     let mut request = client.build();
     request
@@ -1113,7 +1115,10 @@ async fn send_query_sieve_script_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(body["methodCalls"][0][0], "SieveScript/query");
-    assert_eq!(body["methodCalls"][0][1]["filter"], json!({ "isActive": true }));
+    assert_eq!(
+        body["methodCalls"][0][1]["filter"],
+        json!({ "isActive": true })
+    );
     assert_eq!(
         body["methodCalls"][0][1]["sort"],
         json!([{ "property": "name", "isAscending": true }])

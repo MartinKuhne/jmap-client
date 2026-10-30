@@ -278,7 +278,12 @@ async fn email_get_returns_the_rfc_8621_example_record() {
 async fn email_get_with_the_rfc_property_and_body_property_list() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Email/get", email_get_body(vec![], vec!["f123u456"])).await;
+    mount_one(
+        &server,
+        "Email/get",
+        email_get_body(vec![], vec!["f123u456"]),
+    )
+    .await;
 
     let fetched = client
         .email_get(
@@ -518,9 +523,7 @@ async fn email_get_grouped_addresses_land_in_the_flattened_header_map() {
     let email = client
         .email_get(
             "e2",
-            Some([Property::Header(Header::as_grouped_addresses(
-                "To", false,
-            ))]),
+            Some([Property::Header(Header::as_grouped_addresses("To", false))]),
         )
         .await
         .unwrap()
@@ -550,8 +553,12 @@ async fn email_get_grouped_addresses_land_in_the_flattened_header_map() {
 async fn email_get_of_an_unknown_id_returns_none() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Email/get", email_get_body(vec![], vec!["missing"]))
-        .await;
+    mount_one(
+        &server,
+        "Email/get",
+        email_get_body(vec![], vec!["missing"]),
+    )
+    .await;
 
     assert!(client
         .email_get("missing", Some([Property::Id]))
@@ -612,7 +619,12 @@ async fn an_unknown_property_name_is_property_other_and_round_trips_verbatim() {
 async fn email_set_mailbox_sends_a_mailbox_ids_dotted_patch_key() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Email/set", email_updated_body("Mf40b5f831efa7233b9eb1c7f")).await;
+    mount_one(
+        &server,
+        "Email/set",
+        email_updated_body("Mf40b5f831efa7233b9eb1c7f"),
+    )
+    .await;
 
     let updated = client
         .email_set_mailbox("Mf40b5f831efa7233b9eb1c7f", "2ea1ca41b38e", true)
@@ -853,12 +865,8 @@ async fn email_create_a_draft_sends_the_full_rfc_8621_create_object() {
                     .into(),
             )
             .body_value("bd48".to_string(), "I have the most brilliant plan.")
-            .text_body(into_get_part(
-                EmailBodyPart::new().part_id("bd48"),
-            ))
-            .html_body(into_get_part(
-                EmailBodyPart::new().part_id("a49d"),
-            ))
+            .text_body(into_get_part(EmailBodyPart::new().part_id("bd48")))
+            .html_body(into_get_part(EmailBodyPart::new().part_id("a49d")))
             .attachment(into_get_part(
                 EmailBodyPart::new().part_id("att1").name("plan.txt"),
             ));
@@ -866,7 +874,10 @@ async fn email_create_a_draft_sends_the_full_rfc_8621_create_object() {
     let mut response = request.send_set_email().await.unwrap();
     let created = response.created("c0").unwrap();
     assert_eq!(created.id(), Some("Mf40b5f831efa7233b9eb1c7f"));
-    assert_eq!(created.blob_id(), Some("Gf40b5f831efa7233b9eb1c7f8f97d84eeeee64f7"));
+    assert_eq!(
+        created.blob_id(),
+        Some("Gf40b5f831efa7233b9eb1c7f8f97d84eeeee64f7")
+    );
     assert_eq!(created.size(), 359);
 
     // --- wire ---
@@ -875,7 +886,10 @@ async fn email_create_a_draft_sends_the_full_rfc_8621_create_object() {
     let draft_body = &call[1]["create"]["c0"];
     assert_eq!(draft_body["subject"], "World domination");
     assert_eq!(draft_body["mailboxIds"], json!({ "2ea1ca41b38e": true }));
-    assert_eq!(draft_body["keywords"], json!({ "$seen": true, "$draft": true }));
+    assert_eq!(
+        draft_body["keywords"],
+        json!({ "$seen": true, "$draft": true })
+    );
     assert_eq!(
         draft_body["from"],
         json!([{ "name": "Joe Bloggs", "email": "joe@example.com" }])
@@ -896,7 +910,10 @@ async fn email_create_a_draft_sends_the_full_rfc_8621_create_object() {
     assert_eq!(draft_body["sentAt"], "2018-07-10T09:05:08Z");
     assert_eq!(draft_body["bodyStructure"]["type"], "multipart/alternative");
     assert_eq!(draft_body["bodyStructure"]["subParts"][0]["partId"], "a49d");
-    assert_eq!(draft_body["bodyStructure"]["subParts"][1]["type"], "text/plain");
+    assert_eq!(
+        draft_body["bodyStructure"]["subParts"][1]["type"],
+        "text/plain"
+    );
     assert_eq!(
         draft_body["bodyValues"]["bd48"]["value"],
         "I have the most brilliant plan."
@@ -1247,9 +1264,18 @@ async fn email_import_uploads_the_raw_message_then_imports_the_blob() {
         call[1]["emails"]["i0"]["blobId"],
         "Gf40b5f831efa7233b9eb1c7f8f97d84eeeee64f7"
     );
-    assert_eq!(call[1]["emails"]["i0"]["mailboxIds"], json!({ "2ea1ca41b38e": true }));
-    assert_eq!(call[1]["emails"]["i0"]["keywords"], json!({ "$seen": true }));
-    assert_eq!(call[1]["emails"]["i0"]["receivedAt"], "2018-07-10T01:05:08Z");
+    assert_eq!(
+        call[1]["emails"]["i0"]["mailboxIds"],
+        json!({ "2ea1ca41b38e": true })
+    );
+    assert_eq!(
+        call[1]["emails"]["i0"]["keywords"],
+        json!({ "$seen": true })
+    );
+    assert_eq!(
+        call[1]["emails"]["i0"]["receivedAt"],
+        "2018-07-10T01:05:08Z"
+    );
 }
 
 #[tokio::test]
@@ -1390,7 +1416,10 @@ async fn email_parse_returns_the_parsed_email() {
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(call[0], "Email/parse");
     assert_eq!(call[1]["blobIds"], json!(["B1"]));
-    assert_eq!(call[1]["properties"], json!(["subject", "htmlBody", "bodyValues"]));
+    assert_eq!(
+        call[1]["properties"],
+        json!(["subject", "htmlBody", "bodyValues"])
+    );
     assert_eq!(call[1]["bodyProperties"], json!(["partId", "type"]));
     // `Client::email_parse` turns on `fetchAllBodyValues` whenever a byte cap is
     // given, so the cap actually bites on every part.
@@ -1539,10 +1568,7 @@ async fn email_copy_with_destroy_original_needs_the_request_builder() {
     let mut response = request.send_copy_email().await.unwrap();
     assert_eq!(response.from_account_id(), "ue150411c");
     assert_eq!(response.new_state(), "5a0d2447ed26");
-    assert_eq!(
-        response.created("src1").unwrap().id(),
-        Some("dst1")
-    );
+    assert_eq!(response.created("src1").unwrap().id(), Some("dst1"));
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(call[1]["onSuccessDestroyOriginal"], true);
@@ -1772,8 +1798,7 @@ async fn send_import_email_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "Email/import",
+        body["methodCalls"][0][0], "Email/import",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");
@@ -1951,8 +1976,7 @@ async fn send_parse_email_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "Email/parse",
+        body["methodCalls"][0][0], "Email/parse",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");

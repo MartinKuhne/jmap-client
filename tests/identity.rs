@@ -253,10 +253,7 @@ async fn identity_get_pops_the_last_record_when_the_server_returns_several() {
     mount_one(
         &server,
         "Identity/get",
-        identity_get_body(
-            vec![rfc_identity_joe(), rfc_identity_wildcard()],
-            vec![],
-        ),
+        identity_get_body(vec![rfc_identity_joe(), rfc_identity_wildcard()], vec![]),
     )
     .await;
 
@@ -299,11 +296,7 @@ async fn identity_get_sends_only_the_requested_properties() {
     let identity = client
         .identity_get(
             "ID-1",
-            Some(vec![
-                Property::Id,
-                Property::Email,
-                Property::MayDelete,
-            ]),
+            Some(vec![Property::Id, Property::Email, Property::MayDelete]),
         )
         .await
         .unwrap()
@@ -489,7 +482,10 @@ async fn identity_create_reports_invalid_properties() {
     )
     .await;
 
-    let err = client.identity_create("Nope", "not-an-address").await.unwrap_err();
+    let err = client
+        .identity_create("Nope", "not-an-address")
+        .await
+        .unwrap_err();
     let Error::Set(set_err) = err else {
         panic!("expected Error::Set, got {err:?}")
     };
@@ -528,10 +524,7 @@ async fn identity_update_patches_the_html_signature() {
 
     assert!(response.has_updated());
     assert!(
-        response
-            .updated("XD-3301-222-11_22AAz")
-            .unwrap()
-            .is_none(),
+        response.updated("XD-3301-222-11_22AAz").unwrap().is_none(),
         "a null update entry means \"updated, no echo\""
     );
     assert!(response.unwrap_update_errors().is_ok());
@@ -611,7 +604,10 @@ async fn identity_update_reports_not_updated_invalid_properties() {
     .await;
 
     let mut request = client.build();
-    request.set_identity().update("ID-1").email("other@example.com");
+    request
+        .set_identity()
+        .update("ID-1")
+        .email("other@example.com");
     let response = request.send_set_identity().await.unwrap();
 
     // Check the aggregate error *before* the per-record lookup: `updated()`
@@ -665,7 +661,10 @@ async fn identity_set_create_update_and_destroy_in_one_call() {
     // The envelope-level `createdIds` maps the client creation id to the
     // server id (RFC 8620 §3.3/§3.4).
     let created_ids: Vec<(&String, &String)> = response.created_ids().unwrap().collect();
-    assert_eq!(created_ids, vec![(&"c0".to_string(), &"ID-new".to_string())]);
+    assert_eq!(
+        created_ids,
+        vec![(&"c0".to_string(), &"ID-new".to_string())]
+    );
 
     let mut set_response = response
         .method_response_by_pos(0)
@@ -677,10 +676,7 @@ async fn identity_set_create_update_and_destroy_in_one_call() {
     assert_eq!(set_response.created("c0").unwrap().id(), Some("ID-new"));
     assert!(set_response.updated("ID-old").unwrap().is_none());
     set_response.destroyed("ID-gone").unwrap();
-    assert_eq!(
-        set_response.new_state(),
-        "99401312ae-11-335"
-    );
+    assert_eq!(set_response.new_state(), "99401312ae-11-335");
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(call[0], "Identity/set", "method name must be on the wire");
@@ -813,8 +809,7 @@ async fn identity_changes_round_trips_every_member() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "Identity/changes",
+        call[0], "Identity/changes",
         "method name must be on the wire"
     );
     assert_eq!(call[1]["sinceState"], "99401312ae-11-333");
@@ -925,10 +920,7 @@ fn identity_property_display_matches_the_rfc_property_names() {
 ///
 /// The crate exposes no such helper, so the rule lives here; the test pins the
 /// behaviour the RFC prescribes and documents the gap.
-fn most_likely_identity<'a>(
-    identities: &'a [Identity],
-    address: &str,
-) -> Option<&'a Identity> {
+fn most_likely_identity<'a>(identities: &'a [Identity], address: &str) -> Option<&'a Identity> {
     let (_, domain) = address.split_once('@')?;
     identities
         .iter()
@@ -947,10 +939,7 @@ async fn identity_selection_prefers_an_exact_address_over_a_wildcard_identity() 
     mount_one(
         &server,
         "Identity/get",
-        identity_get_body(
-            vec![rfc_identity_joe(), rfc_identity_wildcard()],
-            vec![],
-        ),
+        identity_get_body(vec![rfc_identity_joe(), rfc_identity_wildcard()], vec![]),
     )
     .await;
 
@@ -1018,7 +1007,9 @@ async fn send_changes_identity_sends_the_call_and_parses_the_response() {
     .await;
 
     let mut request = client.build();
-    request.changes_identity("99401312ae-11-333").max_changes(100);
+    request
+        .changes_identity("99401312ae-11-333")
+        .max_changes(100);
     let response = request.send_changes_identity().await.unwrap();
 
     assert_eq!(response.account_id(), ACCOUNT_ID);
@@ -1031,8 +1022,7 @@ async fn send_changes_identity_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "Identity/changes",
+        body["methodCalls"][0][0], "Identity/changes",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][1]["sinceState"], "99401312ae-11-333");

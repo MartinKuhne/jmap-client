@@ -33,7 +33,7 @@ use common::{
 };
 use jmap_client::core::query::{Comparator, Filter};
 use jmap_client::core::set::SetErrorType;
-use jmap_client::principal::{query as principal_query, ACL, DKIM, Property, Type};
+use jmap_client::principal::{query as principal_query, Property, Type, ACL, DKIM};
 use jmap_client::Error;
 use serde_json::{json, Value};
 use wiremock::MockServer;
@@ -147,8 +147,12 @@ async fn only_call(server: &MockServer) -> Value {
 async fn principal_get_parses_a_full_principal_record() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Principal/get", principal_get_body(vec![joe_bloggs()], vec![]))
-        .await;
+    mount_one(
+        &server,
+        "Principal/get",
+        principal_get_body(vec![joe_bloggs()], vec![]),
+    )
+    .await;
 
     let principal = client
         .principal_get("P2342fnddd20", None::<PrincipalProps>)
@@ -206,7 +210,12 @@ async fn principal_get_parses_a_full_principal_record() {
 async fn principal_get_sends_only_the_requested_properties() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Principal/get", principal_get_body(vec![], vec!["P404"])).await;
+    mount_one(
+        &server,
+        "Principal/get",
+        principal_get_body(vec![], vec!["P404"]),
+    )
+    .await;
 
     let found = client
         .principal_get(
@@ -258,11 +267,7 @@ async fn individual_create_sends_a_minimal_patch_and_returns_the_record() {
     mount_jmap(
         &server,
         jmap_response_with_created_ids(
-            vec![inv(
-                "Principal/set",
-                "s0",
-                created_principal(joe_bloggs()),
-            )],
+            vec![inv("Principal/set", "s0", created_principal(joe_bloggs()))],
             json!({ "c0": "P2342fnddd20" }),
             SESSION_STATE,
         ),
@@ -404,8 +409,12 @@ async fn domain_enable_dkim_patches_secret_and_dkim_together() {
 async fn domain_enable_dkim_sends_an_explicit_null_expiration() {
     let server = MockServer::start().await;
     let client = connected_client(&server).await;
-    mount_one(&server, "Principal/set", updated_principal(json!({ "id": "P1" })))
-        .await;
+    mount_one(
+        &server,
+        "Principal/set",
+        updated_principal(json!({ "id": "P1" })),
+    )
+    .await;
 
     client
         .domain_enable_dkim("P1", "key-material", "sel1", None)
@@ -498,11 +507,7 @@ async fn scalar_setters_patch_only_the_named_property() {
     mount_jmap(
         &server,
         jmap_response(
-            vec![inv(
-                "Principal/set",
-                "s0",
-                updated_principal(Value::Null),
-            )],
+            vec![inv("Principal/set", "s0", updated_principal(Value::Null))],
             SESSION_STATE,
         ),
     )
@@ -563,11 +568,7 @@ async fn collection_setters_replace_wholesale_or_null_out() {
     mount_jmap(
         &server,
         jmap_response(
-            vec![inv(
-                "Principal/set",
-                "s0",
-                updated_principal(Value::Null),
-            )],
+            vec![inv("Principal/set", "s0", updated_principal(Value::Null))],
             SESSION_STATE,
         ),
     )
@@ -837,7 +838,10 @@ async fn principal_query_with_no_filter_or_sort_omits_both_members() {
     mount_one(&server, "Principal/query", query_body(vec!["P1"], 1)).await;
 
     client
-        .principal_query(None::<Filter<principal_query::Filter>>, None::<PrincipalSort>)
+        .principal_query(
+            None::<Filter<principal_query::Filter>>,
+            None::<PrincipalSort>,
+        )
         .await
         .unwrap();
 
@@ -953,7 +957,10 @@ async fn principal_changes_reports_created_updated_and_destroyed() {
     let args = only_call(&server).await;
     assert_eq!(args["sinceState"], "4242");
     assert_eq!(args["maxChanges"], 128);
-    assert_eq!(single_jmap_request(&server).await["methodCalls"][0][0], "Principal/changes");
+    assert_eq!(
+        single_jmap_request(&server).await["methodCalls"][0][0],
+        "Principal/changes"
+    );
 }
 
 #[tokio::test]
@@ -1017,10 +1024,7 @@ async fn a_method_level_error_short_circuits_the_helper() {
     let client = connected_client(&server).await;
     mount_jmap(
         &server,
-        jmap_response(
-            vec![method_error("s0", "unknownMethod")],
-            SESSION_STATE,
-        ),
+        jmap_response(vec![method_error("s0", "unknownMethod")], SESSION_STATE),
     )
     .await;
 
@@ -1075,7 +1079,10 @@ fn principal_enum_wire_names() {
     ] {
         assert_eq!(serde_json::to_value(property).unwrap(), json!(wire));
         assert_eq!(property.to_string(), wire);
-        assert_eq!(serde_json::from_value::<Property>(json!(wire)).unwrap(), property);
+        assert_eq!(
+            serde_json::from_value::<Property>(json!(wire)).unwrap(),
+            property
+        );
     }
 
     // `ACL` — note the *serde* name is `mayXyz` while `Display` drops the `may`
@@ -1093,7 +1100,10 @@ fn principal_enum_wire_names() {
         (ACL::SetSeen, "maySetSeen", "setSeen"),
     ] {
         assert_eq!(serde_json::to_value(acl).unwrap(), json!(serde_name));
-        assert_eq!(serde_json::from_value::<ACL>(json!(serde_name)).unwrap(), acl);
+        assert_eq!(
+            serde_json::from_value::<ACL>(json!(serde_name)).unwrap(),
+            acl
+        );
         assert_eq!(acl.to_string(), display);
     }
 
@@ -1276,8 +1286,7 @@ async fn send_get_principal_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "Principal/get",
+        body["methodCalls"][0][0], "Principal/get",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");

@@ -30,8 +30,8 @@
 mod common;
 
 use common::{
-    connected_client, jmap_response, jmap_response_with_created_ids, mount_jmap, single_jmap_request,
-    ACCOUNT_ID, SESSION_STATE,
+    connected_client, jmap_response, jmap_response_with_created_ids, mount_jmap,
+    single_jmap_request, ACCOUNT_ID, SESSION_STATE,
 };
 use jmap_client::core::set::SetErrorType;
 use jmap_client::vacation_response::Property;
@@ -149,8 +149,7 @@ async fn vacation_response_get_parses_the_enabled_singleton() {
     // --- what actually went over the wire (RFC 8620 §3.2/§5.1) ---
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "VacationResponse/get",
+        call[0], "VacationResponse/get",
         "method name must be on the wire"
     );
     assert_eq!(call[2], "s0");
@@ -302,8 +301,7 @@ async fn vacation_response_enable_sends_the_full_patch() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "VacationResponse/set",
+        call[0], "VacationResponse/set",
         "method name must be on the wire"
     );
     assert_eq!(
@@ -382,7 +380,10 @@ async fn vacation_response_disable_sends_is_enabled_false() {
     assert!(!vacation.is_enabled());
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
-    assert_eq!(call[0], "VacationResponse/set", "method name must be on the wire");
+    assert_eq!(
+        call[0], "VacationResponse/set",
+        "method name must be on the wire"
+    );
     assert_eq!(
         call[1]["update"]["singleton"],
         json!({ "isEnabled": false }),
@@ -417,8 +418,7 @@ async fn vacation_response_set_dates_emits_both_timestamps() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "VacationResponse/set",
+        call[0], "VacationResponse/set",
         "method name must be on the wire"
     );
     assert_eq!(
@@ -524,8 +524,7 @@ async fn vacation_response_create_uses_a_creation_id() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "VacationResponse/set",
+        call[0], "VacationResponse/set",
         "method name must be on the wire"
     );
     assert_eq!(
@@ -615,10 +614,7 @@ async fn vacation_response_set_reports_an_invalid_date_range() {
         set_err.properties(),
         Some(&["fromDate".to_string(), "toDate".to_string()][..])
     );
-    assert_eq!(
-        set_err.description(),
-        Some("toDate must be after fromDate")
-    );
+    assert_eq!(set_err.description(), Some("toDate must be after fromDate"));
 }
 
 #[tokio::test]
@@ -641,8 +637,7 @@ async fn vacation_response_destroy_removes_the_singleton() {
 
     let call = single_jmap_request(&server).await["methodCalls"][0].clone();
     assert_eq!(
-        call[0],
-        "VacationResponse/set",
+        call[0], "VacationResponse/set",
         "method name must be on the wire"
     );
     assert_eq!(call[1]["destroy"], json!(["singleton"]));
@@ -849,8 +844,7 @@ async fn send_get_vacation_response_sends_the_call_and_parses_the_response() {
 
     let body = single_jmap_request(&server).await;
     assert_eq!(
-        body["methodCalls"][0][0],
-        "VacationResponse/get",
+        body["methodCalls"][0][0], "VacationResponse/get",
         "the wrapper must put the method name on the wire"
     );
     assert_eq!(body["methodCalls"][0][2], "s0");

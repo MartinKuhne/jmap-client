@@ -79,10 +79,10 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use crate::http::{HttpRequest, HttpResponse};
+use crate::problem::problem_response;
 use crate::problem::problem_type::{
     CANNOT_UPLOAD_BLOB, NOT_FOUND, NOT_WEBSOCKET_UPGRADE, UNAUTHORIZED,
 };
-use crate::problem::problem_response;
 use crate::push::PushBus;
 
 /// The push notification types the mock emits, re-exported so tests can build
@@ -180,11 +180,7 @@ impl Shared {
             .position(|inj| inj.remaining > 0 && path.contains(&inj.path_substr))?;
         let mut inj = self.raw.remove(index);
         inj.remaining -= 1;
-        let response = HttpResponse::raw(
-            inj.status,
-            inj.content_type.clone(),
-            inj.body.clone(),
-        );
+        let response = HttpResponse::raw(inj.status, inj.content_type.clone(), inj.body.clone());
         if inj.remaining > 0 {
             self.raw.push(inj);
         }
@@ -222,11 +218,11 @@ impl MockHandle {
     /// Makes the next `times` calls of JMAP method `method` answer with a
     /// `["error", {"type": type_}, callId]` method response.
     pub fn inject_method_error(&self, method: &str, type_: &str, times: usize) {
-        self.inner
-            .lock()
-            .unwrap()
-            .method_errors
-            .push((method.to_string(), type_.to_string(), times));
+        self.inner.lock().unwrap().method_errors.push((
+            method.to_string(),
+            type_.to_string(),
+            times,
+        ));
     }
 
     /// Responds with raw bytes (any content type) for the next `times` requests
@@ -305,7 +301,9 @@ impl MockHandle {
     /// The state string is whatever the caller passes, so a test can assert on
     /// the exact `changed` map without touching the store.
     pub fn trigger_state_change(&self, data_type: &str, new_state: &str) -> u64 {
-        self.push_event(PushEvent::state_change_one(ACCOUNT_ID, data_type, new_state))
+        self.push_event(PushEvent::state_change_one(
+            ACCOUNT_ID, data_type, new_state,
+        ))
     }
 
     /// Pushes a `StateChange` for an explicit `accountId -> { type -> state }`
@@ -486,7 +484,8 @@ impl MockJmapServer {
                 .build()
                 .expect("mock-jmap: failed to build tokio runtime");
             runtime.block_on(async move {
-                let listener = TcpListener::from_std(std_listener).expect("mock-jmap: from_std failed");
+                let listener =
+                    TcpListener::from_std(std_listener).expect("mock-jmap: from_std failed");
                 accept_loop(listener, loop_shared, loop_shutdown).await;
             });
         });
@@ -681,7 +680,10 @@ pub fn route(shared: &mut Shared, request: &HttpRequest) -> HttpResponse {
 
 /// `POST /upload/{accountId}` — RFC 8620 §5.1.
 fn handle_upload(shared: &mut Shared, request: &HttpRequest) -> HttpResponse {
-    let account_id = request.path.trim_start_matches("/upload/").trim_end_matches('/');
+    let account_id = request
+        .path
+        .trim_start_matches("/upload/")
+        .trim_end_matches('/');
     if account_id != ACCOUNT_ID {
         return problem_response(404, NOT_FOUND, "Unknown account", Some(account_id));
     }
@@ -702,7 +704,10 @@ fn handle_upload(shared: &mut Shared, request: &HttpRequest) -> HttpResponse {
         .unwrap_or("application/octet-stream")
         .to_string();
     let size = request.body.len();
-    let blob_id = shared.store.blobs.put(request.body.clone(), content_type.clone());
+    let blob_id = shared
+        .store
+        .blobs
+        .put(request.body.clone(), content_type.clone());
     shared.store.touch();
 
     HttpResponse::json(
