@@ -1441,8 +1441,11 @@ mod tests {
         "accountId": "ue150411c"
     }, "c0"]"#;
 
-    /// RFC 9670 §4.1 — `Principal/get`, the `Joe Bloggs` record. The crate
-    /// spells the time zone `timezone` and reads the sharing map as `acl`.
+    /// RFC 9670 §2 Figure 3 — `Principal/get`, the `Joe Bloggs` record, in the
+    /// RFC's own spellings: `timeZone`, `capabilities` as a map of capability
+    /// URI to object, and the sharing map under §4's `shareWith`. The
+    /// Stalwart-only extensions (`aliases`, `secret`, `quota`, `picture`,
+    /// `members`) ride alongside.
     const PRINCIPAL_GET: &str = r#"["Principal/get", {
         "accountId": "P1",
         "state": "7b8eff5zz",
@@ -1452,14 +1455,17 @@ mod tests {
             "name": "Joe Bloggs",
             "description": null,
             "email": "joe.bloggs@example.com",
-            "timezone": "Australia/Melbourne",
-            "capabilities": ["urn:ietf:params:jmap:mail"],
+            "timeZone": "Australia/Melbourne",
+            "capabilities": {
+                "urn:ietf:params:jmap:mail": {},
+                "urn:com.example:jmap:todo": { "mayShareWith": true }
+            },
             "aliases": ["joe.bloggs@alternate.example.com"],
             "secret": "hunter2",
             "quota": 1048576,
             "picture": "https://example.org/avatar/joe.png",
             "members": [],
-            "acl": { "P674pp24095qo49pr": ["mayReadItems", "mayAddItems"] }
+            "shareWith": { "P674pp24095qo49pr": ["mayReadItems", "mayAddItems"] }
         }],
         "notFound": []
     }, "c0"]"#;
@@ -2597,9 +2603,14 @@ mod tests {
         assert_eq!(principal.description(), None, "explicit null");
         assert_eq!(principal.email(), Some("joe.bloggs@example.com"));
         assert_eq!(principal.timezone(), Some("Australia/Melbourne"));
+        let capabilities = principal
+            .capabilities()
+            .expect("RFC 9670 §2 capabilities must parse");
+        assert_eq!(capabilities.len(), 2);
+        assert_eq!(capabilities["urn:ietf:params:jmap:mail"], json!({}));
         assert_eq!(
-            principal.capabilities(),
-            Some(&["urn:ietf:params:jmap:mail".to_string()][..])
+            capabilities["urn:com.example:jmap:todo"]["mayShareWith"],
+            json!(true)
         );
         assert_eq!(
             principal.aliases(),

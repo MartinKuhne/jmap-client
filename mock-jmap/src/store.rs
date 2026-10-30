@@ -598,6 +598,8 @@ impl Store {
         );
 
         // --- principals --------------------------------------------------
+        // RFC 9670 §2 spellings: `timeZone` and `capabilities` as a map of
+        // capability URI to object.
         self.principals.seed(
             "pr_1",
             json!({
@@ -606,8 +608,11 @@ impl Store {
                 "name": "Test User",
                 "description": "The primary mock principal",
                 "email": "test@example.org",
-                "timezone": "Etc/UTC",
-                "capabilities": ["urn:ietf:params:jmap:principal", "urn:ietf:params:jmap:principals:owner"],
+                "timeZone": "Etc/UTC",
+                "capabilities": {
+                    "urn:ietf:params:jmap:principal": {},
+                    "urn:ietf:params:jmap:principals:owner": {}
+                },
                 "aliases": ["alias@example.org"],
                 "quota": 1_073_741_824,
                 "members": []
@@ -621,7 +626,7 @@ impl Store {
                 "name": "Team",
                 "description": "A mock group principal",
                 "email": "team@example.org",
-                "capabilities": ["urn:ietf:params:jmap:principal"],
+                "capabilities": { "urn:ietf:params:jmap:principal": {} },
                 "members": ["pr_1"]
             }),
         );

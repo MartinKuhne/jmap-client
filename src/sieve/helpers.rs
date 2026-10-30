@@ -26,6 +26,13 @@ use super::{
     Property, SieveScript,
 };
 
+/// draft-ietf-jmap-sieve-12 §2.2.1 — the upload example posts the script with
+/// `Content-Type: application/sieve`, and the `Blob/upload` example records the
+/// blob under the same type. A caller that needs a different type uploads the
+/// bytes itself with `Client::upload`, which takes an explicit content type, and
+/// hands the returned blob id to `SieveScript::blob_id`.
+const SIEVE_SCRIPT_CONTENT_TYPE: &str = "application/sieve";
+
 impl Client {
     #[maybe_async::maybe_async]
     pub async fn sieve_script_create(
@@ -34,7 +41,10 @@ impl Client {
         script: impl Into<Vec<u8>>,
         activate: bool,
     ) -> crate::Result<SieveScript> {
-        let blob_id = self.upload(None, script.into(), None).await?.take_blob_id();
+        let blob_id = self
+            .upload(None, script.into(), Some(SIEVE_SCRIPT_CONTENT_TYPE))
+            .await?
+            .take_blob_id();
         let mut request = self.build();
         let set_request = request.set_sieve_script();
         let id = set_request
@@ -61,7 +71,10 @@ impl Client {
         script: impl Into<Vec<u8>>,
         activate: bool,
     ) -> crate::Result<Option<SieveScript>> {
-        let blob_id = self.upload(None, script.into(), None).await?.take_blob_id();
+        let blob_id = self
+            .upload(None, script.into(), Some(SIEVE_SCRIPT_CONTENT_TYPE))
+            .await?
+            .take_blob_id();
         let mut request = self.build();
         let set_request = request.set_sieve_script();
         set_request.update(id).blob_id(blob_id);
@@ -112,7 +125,7 @@ impl Client {
         request
             .set_sieve_script()
             .arguments()
-            .on_success_deactivate_script(true);
+            .on_success_deactivate_script();
         request
             .send_single::<SieveScriptSetResponse>()
             .await?
@@ -165,7 +178,10 @@ impl Client {
 
     #[maybe_async::maybe_async]
     pub async fn sieve_script_validate(&self, script: impl Into<Vec<u8>>) -> crate::Result<()> {
-        let blob_id = self.upload(None, script.into(), None).await?.take_blob_id();
+        let blob_id = self
+            .upload(None, script.into(), Some(SIEVE_SCRIPT_CONTENT_TYPE))
+            .await?
+            .take_blob_id();
         let mut request = self.build();
         request.validate_sieve_script(blob_id);
         request

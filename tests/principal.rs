@@ -15,20 +15,13 @@
 //!
 //! ## A note on how closely the fixtures track RFC 9670
 //!
-//! The `Principal` type is specified in RFC 9670 §2, but this crate's model
-//! predates and diverges from it in three ways that the fixtures have to
-//! accommodate (both recorded in the `COVERAGE_PLAN.md` Findings log):
-//!
-//! * RFC 9670 spells the time zone `timeZone`; the crate serialises `timezone`,
-//!   so the RFC's own spelling would be silently dropped on read.
-//! * RFC 9670 makes `capabilities` a *map* of URI → object; the crate models it
-//!   as a flat `String[]`.
-//! * RFC 9670 has no `secret`, `aliases`, `members`, `dkim`, `quota`,
-//!   `picture` or `acl`, and no `domain`/`list` principal types; those are the
-//!   Stalwart extensions the helpers in this file exercise.
-//!
-//! So the fixtures keep the RFC's *ids, names and shape of the exchange* verbatim
-//! and adjust only the member spellings the crate can actually parse.
+//! The `Principal` type is specified in RFC 9670 §2, and the fixtures use the
+//! RFC's own member spellings: `timeZone` (§2), `capabilities` as a *map* of
+//! URI → object (§2), and `shareWith` for the sharing map (§4). What the RFC
+//! does not define at all is the Stalwart extension set the helpers here
+//! exercise — `secret`, `aliases`, `members`, `dkim`, `quota`, `picture`, and
+//! the `domain`/`list` principal types — so those are the only members the
+//! fixtures add.
 
 mod common;
 
@@ -78,9 +71,9 @@ async fn mount_one(server: &MockServer, name: &str, body: Value) {
     .await
 }
 
-/// RFC 9670 §4.1 Figure 3 — the `Joe Bloggs` entry of the `Principal/get`
-/// example, with the three member spellings this crate requires adjusted (see the
-/// module header).
+/// RFC 9670 §2 Figure 3 — the `Joe Bloggs` entry of the `Principal/get`
+/// example, in the RFC's own member spellings, plus the Stalwart extension
+/// members this crate models (see the module header).
 fn joe_bloggs() -> Value {
     json!({
         "id": "P2342fnddd20",
@@ -88,14 +81,16 @@ fn joe_bloggs() -> Value {
         "name": "Joe Bloggs",
         "description": null,
         "email": "joe.bloggs@example.com",
-        "timezone": "Australia/Melbourne",
-        "capabilities": ["urn:ietf:params:jmap:mail"],
+        "timeZone": "Australia/Melbourne",
+        "capabilities": {
+            "urn:com.example:jmap:todo": { "accountId": null, "mayShareWith": true }
+        },
         "aliases": ["joe.bloggs@alternate.example.com"],
         "secret": "hunter2",
         "quota": 1_048_576,
         "picture": "https://example.org/avatar/joe.png",
         "members": [],
-        "acl": {
+        "shareWith": {
             "P674pp24095qo49pr": ["mayReadItems", "mayAddItems"]
         }
     })
@@ -171,9 +166,18 @@ async fn principal_get_parses_a_full_principal_record() {
         principal.picture(),
         Some("https://example.org/avatar/joe.png")
     );
+    let capabilities = principal
+        .capabilities()
+        .expect("RFC 9670 §2 capabilities must parse as a map");
+    assert_eq!(capabilities.len(), 1);
     assert_eq!(
-        principal.capabilities().unwrap(),
-        ["urn:ietf:params:jmap:mail"]
+        capabilities["urn:com.example:jmap:todo"]["mayShareWith"],
+        json!(true),
+        "the capability's own object must survive the parse"
+    );
+    assert_eq!(
+        capabilities["urn:com.example:jmap:todo"]["accountId"],
+        Value::Null
     );
     assert_eq!(
         principal.aliases().unwrap(),
@@ -182,7 +186,8 @@ async fn principal_get_parses_a_full_principal_record() {
     assert!(principal.members().unwrap().is_empty());
     assert_eq!(
         principal.acl().unwrap()["P674pp24095qo49pr"],
-        vec![ACL::ReadItems, ACL::AddItems]
+        vec![ACL::ReadItems, ACL::AddItems],
+        "the sharing map arrives under RFC 9670 §4's `shareWith` name"
     );
 
     // The method name really went on the wire, and the capability was declared.
@@ -541,10 +546,10 @@ async fn scalar_setters_patch_only_the_named_property() {
             json!({ "name": "New Name" }),
             json!({ "secret": "s3cret" }),
             json!({ "email": "new@example.org" }),
-            json!({ "timezone": "Europe/Berlin" }),
+            json!({ "timeZone": "Europe/Berlin" }),
             // An explicit `None` rides the wire as JSON null: that *is* the
             // "unset this property" patch (RFC 8620 §5.3).
-            json!({ "timezone": null }),
+            json!({ "timeZone": null }),
         ]
     );
 }
@@ -575,7 +580,7 @@ async fn collection_setters_replace_wholesale_or_null_out() {
         .await
         .unwrap();
     client
-        .principal_set_capabilities("P1", Some(vec!["urn:ietf:params:jmap:mail"]))
+        .principal_set_capabilities("P1", Some([("urn:ietf:params:jmap:mail", json!({}))]))
         .await
         .unwrap();
     client
@@ -594,7 +599,7 @@ async fn collection_setters_replace_wholesale_or_null_out() {
         vec![
             json!({ "members": ["P2", "P3"] }),
             json!({ "aliases": ["alias@example.org"] }),
-            json!({ "capabilities": ["urn:ietf:params:jmap:mail"] }),
+            json!({ "capabilities": { "urn:ietf:params:jmap:mail": {} } }),
             json!({ "members": null }),
         ]
     );
@@ -875,7 +880,7 @@ async fn every_principal_filter_variant_reaches_the_wire() {
         ),
         (
             principal_query::Filter::timezone("Australia/Melbourne"),
-            json!({ "timezone": "Australia/Melbourne" }),
+            json!({ "timeZone": "Australia/Melbourne" }),
         ),
         (
             principal_query::Filter::members("P1"),
@@ -1048,15 +1053,15 @@ fn principal_enum_wire_names() {
     }
 
     // `Property` — the names `Principal/get`'s `properties` argument carries.
-    // `shareWith` is the RFC 9670 §4 shared-data property; the rest are the
-    // crate's own members.
+    // RFC 9670 §2 spells the time zone `timeZone` and §4 names the shared-data
+    // property `shareWith`; the rest are the crate's own members.
     for (property, wire) in [
         (Property::Id, "id"),
         (Property::Type, "type"),
         (Property::Name, "name"),
         (Property::Description, "description"),
         (Property::Email, "email"),
-        (Property::Timezone, "timezone"),
+        (Property::Timezone, "timeZone"),
         (Property::Capabilities, "capabilities"),
         (Property::Aliases, "aliases"),
         (Property::Secret, "secret"),
@@ -1112,20 +1117,125 @@ fn principal_enum_wire_names() {
 
 #[test]
 fn the_acl_map_round_trips_under_its_own_member_name() {
-    // The crate serialises the sharing map as `acl`, not as the RFC 9670 §4
-    // `shareWith` name; `Property::ShareWith` still spells `shareWith`, so the
-    // two must not be confused (recorded as a Finding).
+    // RFC 9670 §4 names the sharing map `shareWith`, and that is now both the
+    // name `Property::ShareWith` asks the server for and the name the record is
+    // read and written under. The Rust accessor keeps the short `acl` name; the
+    // private spelling must never reach the wire.
     let wire = json!({
         "id": "P1",
         "type": "individual",
-        "acl": { "P2": ["mayReadItems"] }
+        "shareWith": { "P2": ["mayReadItems"] }
     });
     let principal: jmap_client::principal::Principal<jmap_client::Get> =
         serde_json::from_value(wire).unwrap();
     assert_eq!(principal.acl().unwrap()["P2"], vec![ACL::ReadItems]);
+    let written = serde_json::to_value(&principal).unwrap();
+    assert_eq!(written["shareWith"]["P2"], json!(["mayReadItems"]));
+    assert!(
+        written.get("acl").is_none(),
+        "`acl` is not a JMAP member name: {written}"
+    );
+}
+
+/// RFC 9670 §2 Figure 3 — the `Principal/get` example record, verbatim.
+fn rfc_9670_figure_3() -> Value {
+    json!({
+        "id": "P2342fnddd20",
+        "type": "individual",
+        "name": "Joe Bloggs",
+        "description": null,
+        "email": "joe.bloggs@example.com",
+        "timeZone": "Australia/Melbourne",
+        "capabilities": {
+            "urn:com.example:jmap:todo": {
+                "accountId": null,
+                "mayShareWith": true
+            }
+        },
+        "accounts": null
+    })
+}
+
+/// RFC 9670 §2 — a compliant server's record parses and every accessor
+/// returns the data. The RFC's `capabilities` is a `String[Object]`, so a
+/// server that answers with the RFC shape used to fail the parse outright.
+#[test]
+fn the_verbatim_rfc_9670_example_record_parses() {
+    let principal: jmap_client::principal::Principal<jmap_client::Get> =
+        serde_json::from_value(rfc_9670_figure_3()).expect("the RFC's own record must deserialize");
+
+    assert_eq!(principal.id(), Some("P2342fnddd20"));
+    assert_eq!(principal.timezone(), Some("Australia/Melbourne"));
+    let capabilities = principal
+        .capabilities()
+        .expect("capabilities must be present as a map");
+    assert_eq!(capabilities.len(), 1);
     assert_eq!(
-        serde_json::to_value(&principal).unwrap()["acl"]["P2"],
-        json!(["mayReadItems"])
+        capabilities["urn:com.example:jmap:todo"]["accountId"],
+        Value::Null
+    );
+    assert_eq!(
+        capabilities["urn:com.example:jmap:todo"]["mayShareWith"],
+        json!(true)
+    );
+    assert!(
+        principal.acl().is_none(),
+        "Figure 3 shares nothing, so shareWith stays absent"
+    );
+}
+
+/// RFC 9670 §2.1 — a property-subset request asks the server for the RFC
+/// spelling, `timeZone`.
+#[tokio::test]
+async fn a_property_subset_request_asks_for_the_rfc_time_zone_name() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(
+        &server,
+        "Principal/get",
+        principal_get_body(vec![rfc_9670_figure_3()], vec![]),
+    )
+    .await;
+    let principal = client
+        .principal_get("P2342fnddd20", Some([Property::Id, Property::Timezone]))
+        .await
+        .unwrap()
+        .expect("the record must come back");
+
+    let args = only_call(&server).await;
+    assert_eq!(
+        args["properties"],
+        json!(["id", "timeZone"]),
+        "a property-subset request must ask for the RFC spelling"
+    );
+    assert_eq!(
+        principal.timezone(),
+        Some("Australia/Melbourne"),
+        "and the answer under that name must be read back"
+    );
+}
+
+/// RFC 9670 §4 — patching the sharing map writes it under `shareWith`, the
+/// same name `Property::ShareWith` asks the server for.
+#[tokio::test]
+async fn a_share_with_patch_goes_out_under_the_rfc_name() {
+    let server = MockServer::start().await;
+    let client = connected_client(&server).await;
+    mount_one(&server, "Principal/set", updated_principal(Value::Null)).await;
+
+    let mut request = client.build();
+    request
+        .set_principal()
+        .update("P2342fnddd20")
+        .acl(Some(ahash::AHashMap::from([(
+            "P674pp24095qo49pr".to_string(),
+            vec![ACL::ReadItems],
+        )])));
+    request.send_set_principal().await.unwrap();
+
+    assert_eq!(
+        only_call(&server).await["update"]["P2342fnddd20"],
+        json!({ "shareWith": { "P674pp24095qo49pr": ["mayReadItems"] } })
     );
 }
 

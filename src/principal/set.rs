@@ -12,6 +12,7 @@
 use super::{Principal, Property, Type, ACL, DKIM};
 use crate::{core::set::SetObject, Get, Set};
 use ahash::AHashMap;
+use serde_json::Value;
 
 impl Principal<Set> {
     pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
@@ -59,6 +60,8 @@ impl Principal<Set> {
         self
     }
 
+    /// RFC 9670 §4 — the sharing map, Principal id → the rights given to that
+    /// Principal. It rides the wire under the RFC's `shareWith` name.
     pub fn acl(&mut self, acl: Option<AHashMap<String, Vec<ACL>>>) -> &mut Self {
         self.acl = acl;
         self
@@ -80,12 +83,17 @@ impl Principal<Set> {
         self
     }
 
+    /// RFC 9670 §2 — `capabilities` is `String[Object]`: a map of JMAP
+    /// capability URI to the domain-specific object that capability defines
+    /// for a Principal. Anything that yields `(uri, value)` pairs is accepted,
+    /// so both an `AHashMap<String, Value>` and a slice of pairs work.
     pub fn capabilities<T, U>(&mut self, capabilities: Option<T>) -> &mut Self
     where
-        T: IntoIterator<Item = U>,
+        T: IntoIterator<Item = (U, Value)>,
         U: Into<String>,
     {
-        self.capabilities = capabilities.map(|l| l.into_iter().map(|v| v.into()).collect());
+        self.capabilities =
+            capabilities.map(|l| l.into_iter().map(|(k, v)| (k.into(), v)).collect());
         self
     }
 
@@ -119,7 +127,7 @@ impl SetObject for Principal<Set> {
             description: "".to_string().into(),
             email: "".to_string().into(),
             timezone: "".to_string().into(),
-            capabilities: Vec::with_capacity(0).into(),
+            capabilities: AHashMap::with_capacity(0).into(),
             aliases: Vec::with_capacity(0).into(),
             secret: "".to_string().into(),
             dkim: None,
@@ -192,7 +200,7 @@ mod tests {
                 "name": "Alice Anderson",
                 "description": "Team lead",
                 "email": "alice@example.org",
-                "timezone": "Europe/Berlin",
+                "timeZone": "Europe/Berlin",
                 "secret": "s3cr3t",
                 "quota": 1_073_741_824,
                 "picture": "https://example.org/alice.png"
@@ -253,22 +261,56 @@ mod tests {
         );
     }
 
-    /// RFC 9670 §4 — the three list members.
+    /// RFC 9670 §2 — the two list members, `aliases` and `members`.
     #[test]
     fn list_builders_collect_their_items() {
         let mut principal = principal();
         principal
-            .capabilities(Some(["urn:ietf:params:jmap:principal"]))
             .aliases(Some(["alice@example.org", "a@example.org"]))
             .members(Some(["P1", "P2"]));
 
         assert_eq!(
             serde_json::to_value(&principal).unwrap(),
             json!({
-                "capabilities": ["urn:ietf:params:jmap:principal"],
                 "aliases": ["alice@example.org", "a@example.org"],
                 "members": ["P1", "P2"]
             })
+        );
+    }
+
+    /// RFC 9670 §2 — `capabilities` is `String[Object]`, a map of capability
+    /// URI to that capability's own object, not a flat list of URIs.
+    #[test]
+    fn capabilities_is_a_map_of_uri_to_domain_object() {
+        let mut principal = principal();
+        principal.capabilities(Some([(
+            "urn:com.example:jmap:todo",
+            json!({ "accountId": null, "mayShareWith": true }),
+        )]));
+
+        assert_eq!(
+            serde_json::to_value(&principal).unwrap(),
+            json!({
+                "capabilities": {
+                    "urn:com.example:jmap:todo": {
+                        "accountId": null,
+                        "mayShareWith": true
+                    }
+                }
+            })
+        );
+
+        // A capability whose registered value is an empty object is legal too
+        // (RFC 9670 §1.5.1 gives `urn:ietf:params:jmap:principals` one), and a
+        // ready-made map is accepted as well as an iterator of pairs.
+        let mut shared = <Principal<Set> as SetObject>::new(Some(0));
+        shared.capabilities(Some(AHashMap::from([(
+            "urn:ietf:params:jmap:principal".to_string(),
+            json!({}),
+        )])));
+        assert_eq!(
+            serde_json::to_value(&shared).unwrap(),
+            json!({ "capabilities": { "urn:ietf:params:jmap:principal": {} } })
         );
     }
 
@@ -285,7 +327,7 @@ mod tests {
         );
 
         principal.members(None::<[&str; 0]>);
-        principal.capabilities(None::<[&str; 0]>);
+        principal.capabilities(None::<[(String, Value); 0]>);
         assert_eq!(
             serde_json::to_value(&principal).unwrap(),
             json!({
@@ -296,9 +338,11 @@ mod tests {
         );
     }
 
-    /// RFC 9670 §4 — the `acl` map is principal → list of rights, and
+    /// RFC 9670 §4 — the sharing map is principal → list of rights, and
     /// the rights go out under their serde `mayXxx` names, not the
-    /// `Display` form (Finding #72).
+    /// `Display` form (Finding #72). The map itself rides the wire under
+    /// the RFC's `shareWith` name, which is also the name `Property::ShareWith`
+    /// asks the server for.
     #[test]
     fn acl_map_builder() {
         let mut principal = principal();
@@ -308,14 +352,14 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(&principal).unwrap(),
-            json!({ "acl": { "P2": ["mayReadItems", "mayShare"] } })
+            json!({ "shareWith": { "P2": ["mayReadItems", "mayShare"] } })
         );
 
         principal.acl(None);
         assert_eq!(
             serde_json::to_value(&principal).unwrap(),
-            json!({ "acl": null }),
-            "a cleared acl is sent as null, not omitted"
+            json!({ "shareWith": null }),
+            "a cleared shareWith is sent as null, not omitted"
         );
     }
 

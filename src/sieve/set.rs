@@ -45,18 +45,30 @@ impl SetObject for SieveScript<Set> {
 }
 
 impl SetArguments {
+    /// draft-ietf-jmap-sieve-12 §2.2 — activate a script that is being created
+    /// in this same request. The value is a creation-reference, so the id is
+    /// the creation id prefixed with a `#`.
     pub fn on_success_activate_script(&mut self, id: impl Into<String>) -> &mut Self {
-        self.on_success_activate_script = Some(format!("#{}", id.into()));
+        self.on_success_activate_script = Some(Some(format!("#{}", id.into())));
         self
     }
 
+    /// draft-ietf-jmap-sieve-12 §2.2 — activate a script that already exists.
+    /// The value is its plain id, with no `#` prefix.
     pub fn on_success_activate_script_id(&mut self, id: impl Into<String>) -> &mut Self {
-        self.on_success_activate_script = Some(id.into());
+        self.on_success_activate_script = Some(Some(id.into()));
         self
     }
 
-    pub fn on_success_deactivate_script(&mut self, value: bool) -> &mut Self {
-        self.on_success_deactivate_script = Some(value);
+    /// draft-ietf-jmap-sieve-12 §2.2 — deactivate the currently active script:
+    /// *"If null, the currently active SieveScript (if any) will be deactivated
+    /// if and only if all of the creations, modifications, and destructions
+    /// (if any) succeed."*
+    ///
+    /// The draft has no separate deactivation member; deactivation is the null
+    /// case of `onSuccessActivateScript`, which is what this writes.
+    pub fn on_success_deactivate_script(&mut self) -> &mut Self {
+        self.on_success_activate_script = Some(None);
         self
     }
 }
@@ -80,6 +92,9 @@ mod tests {
     //! (draft-ietf-jmap-sieve-12 §2.2).
 
     use super::*;
+    use crate::core::set::SetRequest;
+    use crate::core::RequestParams;
+    use crate::Method;
     use serde_json::json;
 
     /// draft-ietf-jmap-sieve-12 §2.2 — a create patch carries the
@@ -120,17 +135,79 @@ mod tests {
             "the `_id` form adds no `#`"
         );
 
-        let mut args = SetArguments::default();
-        args.on_success_deactivate_script(true);
-        assert_eq!(
-            serde_json::to_value(&args).unwrap(),
-            json!({ "onSuccessDeactivateScript": true })
-        );
-
         assert_eq!(
             serde_json::to_value(SetArguments::default()).unwrap(),
             json!({}),
             "an untouched argument block writes nothing"
+        );
+    }
+
+    /// draft-ietf-jmap-sieve-12 §2.2 — the single `onSuccessActivateScript`
+    /// member has three distinct wire states, and the client must be able to
+    /// produce each one:
+    ///
+    /// * absent — the active script stays as it is;
+    /// * `null` — deactivate the currently active script;
+    /// * an id — activate that script.
+    ///
+    /// The old client tried to express deactivation with an invented
+    /// `onSuccessDeactivateScript: true` member that no server implements, so
+    /// the deactivation was a silent no-op.
+    #[test]
+    fn the_activation_argument_distinguishes_absent_null_and_a_value() {
+        let untouched = serde_json::to_value(SetArguments::default()).unwrap();
+        assert_eq!(untouched, json!({}));
+        assert!(
+            untouched.get("onSuccessActivateScript").is_none(),
+            "saying nothing must leave the member off entirely, otherwise the \
+             server deactivates the active script by accident"
+        );
+        assert!(
+            untouched.get("onSuccessDeactivateScript").is_none(),
+            "the draft defines no such member"
+        );
+
+        let deactivated = serde_json::to_value({
+            let mut args = SetArguments::default();
+            args.on_success_deactivate_script();
+            args
+        })
+        .unwrap();
+        assert_eq!(deactivated, json!({ "onSuccessActivateScript": null }));
+        assert!(
+            deactivated
+                .get("onSuccessActivateScript")
+                .is_some_and(|v| v.is_null()),
+            "deactivation must be an explicit JSON null, not an omission"
+        );
+
+        let activated = serde_json::to_value({
+            let mut args = SetArguments::default();
+            args.on_success_activate_script_id("script-42");
+            args
+        })
+        .unwrap();
+        assert_eq!(activated, json!({ "onSuccessActivateScript": "script-42" }));
+    }
+
+    /// draft-ietf-jmap-sieve-12 §2.2 — the argument block is flattened onto
+    /// the `SieveScript/set` request, so the null deactivation must survive
+    /// the flattening and land as a top-level `onSuccessActivateScript: null`.
+    #[test]
+    fn the_null_deactivation_survives_flattening_into_the_request() {
+        let mut request = SetRequest::<SieveScript<Set>>::new(RequestParams::new(
+            "ken",
+            Method::SetSieveScript,
+            0,
+        ));
+        request.arguments().on_success_deactivate_script();
+
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            json!({
+                "accountId": "ken",
+                "onSuccessActivateScript": null
+            })
         );
     }
 

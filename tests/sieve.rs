@@ -81,14 +81,15 @@ async fn sieve_client(server: &MockServer) -> jmap_client::client::Client {
 }
 
 /// Answers `POST /upload/{ACCOUNT_ID}` with the draft §2.2.1 upload response
-/// (HTTP 201 Created, per RFC 8620 §6.1).
+/// (HTTP 201 Created, per RFC 8620 §6.1). The draft's example echoes back the
+/// `application/sieve` type the client sent.
 async fn mount_upload(server: &MockServer, blob_id: &str) {
     Mock::given(method("POST"))
         .and(path(format!("/upload/{ACCOUNT_ID}")))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
             "accountId": ACCOUNT_ID,
             "blobId": blob_id,
-            "type": "application/octet-stream",
+            "type": "application/sieve",
             "size": SCRIPT.len()
         })))
         .mount(server)
@@ -152,6 +153,26 @@ async fn uploads(server: &MockServer) -> Vec<Vec<u8>> {
             r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}")
         })
         .map(|r| r.body.clone())
+        .collect()
+}
+
+/// The `Content-Type` of every `POST /upload/{ACCOUNT_ID}` the server recorded.
+async fn upload_content_types(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r.method.as_str() == "POST" && r.url.path() == format!("/upload/{ACCOUNT_ID}")
+        })
+        .map(|r| {
+            r.headers
+                .get("Content-Type")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string)
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -264,8 +285,14 @@ async fn sieve_script_create_uploads_then_creates_and_activates() {
     assert_eq!(script.blob_id(), Some(UPLOADED_BLOB_ID));
     assert!(script.is_active());
 
-    // The upload leg carried the raw script octets.
+    // The upload leg carried the raw script octets, typed as the draft's
+    // `application/sieve` (§2.2.1) rather than the generic octet-stream default.
     assert_eq!(uploads(&server).await, vec![SCRIPT.as_bytes()]);
+    assert_eq!(
+        upload_content_types(&server).await,
+        vec!["application/sieve".to_string()],
+        "draft-ietf-jmap-sieve-12 §2.2.1 uploads the script as `application/sieve`"
+    );
 
     // ...and the set leg referenced the *creation id* with the `#` prefix the
     // draft requires for creation-references (§2.2).
@@ -466,6 +493,12 @@ async fn sieve_script_replace_uploads_a_new_blob_and_reactivates_by_real_id() {
 
     assert!(script.is_active());
 
+    assert_eq!(
+        upload_content_types(&server).await,
+        vec!["application/sieve".to_string()],
+        "a replacement script is uploaded as `application/sieve` too"
+    );
+
     let args = only_call(&server).await;
     assert_eq!(
         args["update"][SCRIPT_ID],
@@ -595,16 +628,31 @@ async fn sieve_script_deactivate_sends_the_deactivation_argument() {
     client.sieve_script_deactivate().await.unwrap();
 
     let args = only_call(&server).await;
-    // KNOWN CLIENT BUG (characterisation, not an endorsement): draft §2.2 has no
-    // `onSuccessDeactivateScript` member at all. It spells deactivation as
-    // `onSuccessActivateScript: Id|null`, where null means "deactivate the
-    // currently active script". The crate invents `onSuccessDeactivateScript:
-    // true` and never sends the draft member, so a spec-compliant server would
-    // ignore the invented field and leave the script active. This test pins the
-    // current wire shape so a change is deliberate; fixing the client means
-    // flipping both assertions below. Recorded in COVERAGE_PLAN.md.
-    assert_eq!(args["onSuccessDeactivateScript"], true);
-    assert!(args.get("onSuccessActivateScript").is_none(), "{args}");
+    // draft-ietf-jmap-sieve-12 §2.2 spells deactivation as the *null case* of
+    // the one argument the method defines: "If null, the currently active
+    // SieveScript (if any) will be deactivated if and only if all of the
+    // creations, modifications, and destructions (if any) succeed." §2.2.1's
+    // deactivate-and-destroy example sends exactly
+    // `"onSuccessActivateScript": null`.
+    assert!(
+        args.get("onSuccessActivateScript")
+            .is_some_and(Value::is_null),
+        "deactivation must go out as an explicit JSON null: {args}"
+    );
+    // The previously-invented member must be gone. A compliant server ignores
+    // an argument it does not define (or rejects the call with
+    // `invalidArguments`), so sending it made the deactivation a silent no-op
+    // that the caller read back as success while the script stayed active.
+    assert!(
+        args.get("onSuccessDeactivateScript").is_none(),
+        "draft §2.2 defines no `onSuccessDeactivateScript`: {args}"
+    );
+    assert!(
+        args.get("create").is_none()
+            && args.get("update").is_none()
+            && args.get("destroy").is_none(),
+        "the draft's deactivate-only call carries the argument alone: {args}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -695,6 +743,11 @@ async fn a_valid_script_comes_back_without_an_error() {
     let args = only_call(&server).await;
     assert_eq!(args["blobId"], UPLOADED_BLOB_ID);
     assert_eq!(args["accountId"], ACCOUNT_ID);
+    assert_eq!(
+        upload_content_types(&server).await,
+        vec!["application/sieve".to_string()],
+        "draft §2.4 uploads the script to validate the same way §2.2 does"
+    );
     assert_eq!(
         single_jmap_request(&server).await["methodCalls"][0][0],
         "SieveScript/validate"

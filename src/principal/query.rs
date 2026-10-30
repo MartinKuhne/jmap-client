@@ -42,7 +42,7 @@ pub enum Filter {
         value: Type,
     },
     Timezone {
-        #[serde(rename = "timezone")]
+        #[serde(rename = "timeZone")]
         value: String,
     },
     Members {
@@ -199,9 +199,11 @@ mod tests {
         }
     }
 
-    /// RFC 9670 §4.4 — the remaining filter constructors, each a
-    /// single-member object under its own RFC name. `timezone` keeps the
-    /// crate's spelling, not the RFC's `timeZone` (Finding #69).
+    /// RFC 9670 §2.4.1 — the remaining filter constructors, each a
+    /// single-member object under its own RFC name. The time-zone condition is
+    /// spelled `timeZone`, with the RFC's capital `Z`; the Rust constructor
+    /// keeps the lower-case `timezone` name because that is all the language
+    /// needs.
     #[test]
     fn every_filter_condition_serialises_with_its_own_key() {
         let cases: Vec<(Filter, serde_json::Value)> = vec![
@@ -217,7 +219,7 @@ mod tests {
             (Filter::text("bloggs"), json!({ "text": "bloggs" })),
             (
                 Filter::timezone("Europe/Berlin"),
-                json!({ "timezone": "Europe/Berlin" }),
+                json!({ "timeZone": "Europe/Berlin" }),
             ),
             (Filter::members("p1234"), json!({ "members": "p1234" })),
             (

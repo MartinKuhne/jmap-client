@@ -50,12 +50,22 @@ pub struct SieveScript<State = Get> {
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SetArguments {
+    /// draft-ietf-jmap-sieve-12 §2.2 — `onSuccessActivateScript: Id|null` is
+    /// the *only* extra argument `SieveScript/set` defines, and the three
+    /// states of that one member are the whole activation model:
+    ///
+    /// * absent — "the currently active SieveScript (if any) will remain as such";
+    /// * `null` — "the currently active SieveScript (if any) will be deactivated";
+    /// * an id, or a `#<createId>` creation-reference — activate that script.
+    ///
+    /// The outer `Option` is what distinguishes "the caller said nothing" from
+    /// "the caller asked for a null": `skip_serializing_if` drops only the outer
+    /// `None`, so an inner `None` still rides the wire as an explicit JSON null.
+    /// There is deliberately no `onSuccessDeactivateScript` member; it does not
+    /// exist in the draft, and a compliant server would ignore it.
     #[serde(rename = "onSuccessActivateScript")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    on_success_activate_script: Option<String>,
-    #[serde(rename = "onSuccessDeactivateScript")]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    on_success_deactivate_script: Option<bool>,
+    on_success_activate_script: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Copy)]

@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::{Principal, Property, Type, DKIM};
+use serde_json::Value;
 
 impl Client {
     #[maybe_async::maybe_async]
@@ -215,11 +216,14 @@ impl Client {
             .updated(id)
     }
 
+    /// RFC 9670 §2 — replace the principal's `capabilities` map: JMAP
+    /// capability URI to the domain-specific object that capability defines
+    /// for a Principal. `None` clears it.
     #[maybe_async::maybe_async]
     pub async fn principal_set_capabilities(
         &self,
         id: &str,
-        capabilities: Option<impl IntoIterator<Item = impl Into<String>>>,
+        capabilities: Option<impl IntoIterator<Item = (impl Into<String>, Value)>>,
     ) -> crate::Result<Option<Principal>> {
         let mut request = self.build();
         request

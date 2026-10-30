@@ -12,6 +12,7 @@
 use super::{Principal, Type, ACL, DKIM};
 use crate::{core::get::GetObject, Get, Set};
 use ahash::AHashMap;
+use serde_json::Value;
 
 impl Principal<Get> {
     pub fn id(&self) -> Option<&str> {
@@ -54,8 +55,10 @@ impl Principal<Get> {
         self.quota
     }
 
-    pub fn capabilities(&self) -> Option<&[String]> {
-        self.capabilities.as_deref()
+    /// RFC 9670 §2 — the `capabilities` map: JMAP capability URI to the
+    /// domain-specific object that capability defines for a Principal.
+    pub fn capabilities(&self) -> Option<&AHashMap<String, Value>> {
+        self.capabilities.as_ref()
     }
 
     pub fn aliases(&self) -> Option<&[String]> {
