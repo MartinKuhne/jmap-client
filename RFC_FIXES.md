@@ -30,7 +30,9 @@ draft-ietf-jmap-sieve-12.
 | B5 | #2 #30 #122 #3 | `maxMailboxDepth` not nullable; `submissionExtensions` modelled as an array not a map; session-level vs account-level capability limits | yes |
 | B6 | #69 #67 #70 | RFC 9670 principal spellings: `timeZone`, `shareWith`, `capabilities` as a map | yes (wire) |
 | B7 | #73 #80 | `DataType` closed enum kills push/subscription parsing; WS `pushState` parsed then discarded | yes |
-| B8 | #104 | `result_reference` can reference its own call id | no |
+| ~~B8~~ | ~~#104~~ | **rejected after verification — not a bug**, see below | — |
+| B9 | — | crate does not compile with `--all-features` (pre-existing at base) | no |
+| B10 | — | async-only integration tests make the `blocking` feature untestable | no |
 
 ## Checked and deliberately NOT treated as bugs
 
@@ -101,3 +103,78 @@ draft-ietf-jmap-sieve-12.
   `tests/email_submission.rs`, `tests/search_snippet.rs`) are rewritten to assert
   the RFC behaviour, none deleted, and `tests/sieve.rs` gains the
   extra-response-under-one-call-id case. 624 passed / 0 failed.
+* **B3 + B9 done.** The SSE parser replaced its buffer wholesale per read and
+  skipped its state reset on both `MAX_EVENT_SIZE` error returns, so a parser
+  that had hit an oversized event re-read the same bytes and went permanently
+  silent; it now keeps the unconsumed tail and resets on every error path.
+  **Investigated and found NOT to be a defect:** on the crate's own stream path a
+  frame split across two reads was already reassembled, because the half-read line
+  lives in `field`/`value`/`result` rather than in the buffer, and `stream.rs`
+  only pushes the next read after `filter_notification()` returned `None`. That is
+  now pinned by a test rather than assumed. B9 fixed the crate not building under
+  `--all-features` (pre-existing at `141b784`): `event_source_url` was declared
+  under `async && !blocking` but constructed under `async` alone. 630 passed.
+* **B4 + B6 done.** Sieve deactivation sent an invented
+  `onSuccessDeactivateScript: true`; draft-ietf-jmap-sieve-12 §2.2 defines only
+  `onSuccessActivateScript: Id|null` and makes the **null** case the deactivation,
+  so the call returned `Ok` while the script stayed active. The member and its
+  builder are gone and deactivation is now `onSuccessActivateScript: null`, with
+  absent/null/value each tested on the wire including through `serde(flatten)`.
+  Sieve uploads use `application/sieve` per §2.2.1. Principals moved to the RFC
+  9670 §2/§4 spellings: `timeZone`, `shareWith` (the client had asked for
+  `shareWith` but read `acl`, so a server's ACL answer was dropped), and
+  `capabilities` as a `String[Object]` map rather than a string array. The mock
+  was part of the problem — it seeded `timezone` and a flat capabilities array,
+  i.e. it encoded the client's private dialect — and now serves the RFC shape.
+  **Breaking:** `on_success_deactivate_script` removed; sieve wire format;
+  `Principal::capabilities()` returns a map. Rust accessor names
+  (`timezone()`, `acl()`) deliberately unchanged. 637 passed.
+* **B5 + B7 done.** RFC 8621 §1.3.1/§1.3.2 put the mail and submission limits in
+  an account's `accountCapabilities` and make the *session*-level values empty
+  objects, but the only accessors were session-level — so against a conforming
+  session `mail_capabilities()` and `submission_capabilities()` returned `None` and
+  no limit was reachable. `Account` now has typed accessors for all four blocks.
+  Two shapes were also wrong and would have failed regardless: `maxMailboxDepth` is
+  `UnsignedInt|null` but was a required `usize`, and `submissionExtensions` is
+  `String[String[]]` but was a `Vec<String>`. Because `Capabilities` is untagged
+  and matched on **shape**, one unparseable member drops the whole block to
+  `Other` and loses every limit — which is why `maxSizeAttachmentsPerEmail` is
+  also an `Option` even though §1.3.1 types it a plain `UnsignedInt`; the field
+  comment says so instead of pretending the RFC allows it. `DataType` gains
+  `Other(String)` (RFC 8620 §7.2 types `types` as `String[]|null`), needing
+  `#[repr(u8)]` for discriminants-plus-data (E0732) and a hand-written
+  `Serialize`, since a derived catch-all would emit `{"Other":"Todo"}` where §7.2
+  wants a bare name; `tests/push_subscription.rs` had been made to send `"Mailbox"`
+  where the §7.2.3 example says `"Todo"` and is restored. `WebSocketMessage` now
+  carries the RFC 8887 §5.2 `pushState` instead of dropping it at the mapping, so
+  push can be resumed after a reconnect. **Breaking:** the two `usize`→
+  `Option<usize>` accessors, `submission_extensions()` returns a map, `DataType`
+  gains a variant and loses integer `as` casts, `PushNotification` wraps
+  `WebSocketPushObject`. 642 passed.
+* **B10 done.** Every integration test is async-only, so enabling the crate's own
+  `blocking` feature made the test target emit hundreds of errors instead of a
+  result. Each file now carries the gate the crate already uses at
+  `src/lib.rs:195`; `tests/websocket.rs` additionally needs `websockets`. Pure
+  gating — 30 insertions, **zero deletions**, no assertion touched, no
+  `#[ignore]` — and the default run is unchanged at 642. `cargo test
+  --no-default-features --features blocking,ring` now runs 275 tests.
+
+## Rejected after verification
+
+* **#104 / B8 — not a bug.** The finding claimed `GetRequest::result_reference()`
+  is broken because it builds the reference from *its own* method and call id.
+  That is the design: the reference means "the result of the request I was built
+  on" and is handed to a **later** call. `examples/result_reference.rs` does
+  exactly that — `query_email().result_reference()` feeds
+  `set_email().destroy_ref(...)`, and `query_mailbox().result_reference()` feeds
+  `get_mailbox().ids_ref(...)`. No change made.
+* **Two instructions I gave that were wrong, corrected before commit.** I told the
+  B5 agent to add `maxSizeMailboxTree` and to make `maxSizeAttachmentsPerEmail`
+  nullable "per RFC 8621 §1.3.1". Checked against the published RFC: §1.3.1 lists
+  exactly `maxMailboxesPerEmail` (`UnsignedInt|null`), `maxMailboxDepth`
+  (`UnsignedInt|null`), `maxSizeMailboxName` (`UnsignedInt`),
+  `maxSizeAttachmentsPerEmail` (`UnsignedInt`), `emailQuerySortOptions` and
+  `mayCreateTopLevelMailbox` — **there is no `maxSizeMailboxTree` in RFC 8621**,
+  and the attachment limit is not nullable. The invented property was removed
+  rather than shipped as API surface; the attachment `Option` was kept only as
+  documented shape-matching tolerance, not as an RFC requirement.
