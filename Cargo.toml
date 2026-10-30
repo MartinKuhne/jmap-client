@@ -34,9 +34,6 @@ parking_lot = "0.12"
 encodify = "1.0"
 maybe-async = "0.2"
 
-[dev-dependencies]
-tokio = { version = "1.51", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "time", "io-util"] }
-
 [features]
 default = ["async", "websockets", "aws_lc_rs"]
 async = ["futures-util", "async-stream", "reqwest/stream"]
@@ -55,7 +52,7 @@ members = [".", "mock-jmap"]
 mock-jmap = { path = "mock-jmap" }
 # HTTP mock for the P3-P6 wiremock-based integration tests (hybrid strategy).
 wiremock = "0.6"
-tokio = { version = "1.51", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.51", default-features = false, features = ["macros", "net", "rt", "rt-multi-thread", "time", "io-util"] }
 
 [lib]
 doctest = false
