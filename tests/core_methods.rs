@@ -12,6 +12,8 @@
 //! `core/response.rs` (Response / TaggedMethodResponse / Get / Query / Set /
 //! createdIds), `core/error.rs` (ProblemDetails / MethodError).
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use std::time::Duration;

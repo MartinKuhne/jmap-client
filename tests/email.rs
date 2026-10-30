@@ -14,6 +14,8 @@
 //! `email/parse.rs` and `email/mod.rs` (`Property`/`Header`/`HeaderForm`/
 //! `HeaderValue`).
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

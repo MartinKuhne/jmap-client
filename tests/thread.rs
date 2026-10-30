@@ -16,6 +16,8 @@
 //! wire shape assertions below cite RFC 8620 §5.1/§5.2 for the envelope and
 //! RFC 8621 §3.1.1 for the record contents.
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

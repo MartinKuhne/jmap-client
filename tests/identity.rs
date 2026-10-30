@@ -30,6 +30,8 @@
 //!   server offers it and never advertises a capability the server withheld. See
 //!   [`identity_using_is_filtered_to_the_session_capabilities`].
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

@@ -13,6 +13,8 @@
 //! (filters, comparators, tree arguments) and `mailbox/mod.rs` (`Role`
 //! (de)serialisation, `Property`).
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

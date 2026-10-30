@@ -18,6 +18,8 @@
 //! bare `client.build().send_changes_mailbox()` would post `methodCalls: []`
 //! and still deserialise a canned single-call response (Findings #31).
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

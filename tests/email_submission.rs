@@ -30,6 +30,8 @@
 //!   same call id, so the primary result is the first of the two — pinned by
 //!   [`email_submission_create_with_the_rfc_implicit_email_set_response_returns_the_submission`].
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

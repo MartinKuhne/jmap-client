@@ -18,6 +18,8 @@
 //! tests mount *both* legs — `POST /upload/{ACCOUNT_ID}` and `POST /jmap` —
 //! and assert each one separately.
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

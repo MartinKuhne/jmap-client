@@ -23,6 +23,8 @@
 //! the `domain`/`list` principal types — so those are the only members the
 //! fixtures add.
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

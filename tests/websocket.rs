@@ -28,6 +28,8 @@
 //! Every wait is bounded: a notification that never arrives fails the test in
 //! `WAIT` instead of hanging the suite.
 
+// Written against the async WebSocket API: `client_ws` needs `websockets`, and `blocking` turns every call synchronous.
+#![cfg(all(feature = "async", feature = "websockets", not(feature = "blocking")))]
 use std::time::Duration;
 
 use futures_util::StreamExt;

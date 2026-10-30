@@ -18,6 +18,8 @@
 //! `blob/copy.rs` (request members, the `copied`/`notCopied` maps and their
 //! accessors) and `blob/helpers.rs`.
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

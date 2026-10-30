@@ -25,6 +25,8 @@
 //! * RFC 8621 §8.2 defines no dedicated "bad date range" SetError, so a server
 //!   rejects one with the standard `invalidProperties` (RFC 8620 §5.3).
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

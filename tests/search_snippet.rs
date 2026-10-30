@@ -16,6 +16,8 @@
 //! `preview` (String|null). Note there is deliberately **no** `partId` /
 //! `emailSnippet` member in this client's model — see the findings log.
 
+// Written against the async API: enabling `blocking` turns every `maybe_async` call synchronous, so this file is compiled out.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 mod common;
 
 use common::{

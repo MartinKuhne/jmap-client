@@ -28,6 +28,8 @@
 //! Every wait is bounded: a notification that never arrives fails in [`WAIT`]
 //! instead of hanging the suite.
 
+// Written against the async API: `event_source` is only built for it, and `blocking` turns every call synchronous.
+#![cfg(all(feature = "async", not(feature = "blocking")))]
 use std::time::Duration;
 
 use ahash::AHashMap;
